@@ -9,6 +9,7 @@ fn main() -> eframe::Result {
     let mut ppi: Option<f32> = None;
     let mut seek: Option<f64> = None;
     let mut ws: Option<String> = None;
+    let mut autoplay = false;
 
     let mut it = args.iter().skip(1);
     while let Some(a) = it.next() {
@@ -26,6 +27,7 @@ fn main() -> eframe::Result {
             "--ppi" => ppi = it.next().and_then(|v| v.parse().ok()),
             "--ws" => ws = it.next().map(|s| s.to_ascii_lowercase()),
             "--seek" => seek = it.next().and_then(|v| v.parse::<f64>().ok()),
+            "--play" => autoplay = true,
             "--gen-icon" => {
                 let path = it.next().cloned().unwrap_or_else(|| "icon.png".into());
                 let size: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(512);
@@ -44,6 +46,8 @@ fn main() -> eframe::Result {
                 println!("  --selftest     run scripted end-to-end functional test");
                 println!("  --where        print resolved FFmpeg/ffprobe paths and exit");
                 println!("  --ws NAME      start workspace: edit|color|audio|fx|export");
+                println!("  --seek T       set the playhead position (seconds)");
+                println!("  --play         start playback automatically (with --demo)");
                 println!("  --ppi N        override pixels-per-point");
                 println!("  --gen-icon P [SIZE]  write app icon (png/ico) and exit");
                 return Ok(());
@@ -84,6 +88,7 @@ fn main() -> eframe::Result {
             }
             let mut app = App::new(cc, demo, selftest);
             app.pending_seek = seek;
+            app.autoplay = autoplay;
             if let Some(w) = ws {
                 app.workspace = match w.as_str() {
                     "color" => kestrelcut::app::Workspace::Color,

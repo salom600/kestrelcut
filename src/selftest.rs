@@ -16,6 +16,11 @@ pub struct SelfTest {
     pub finished: bool,
     pub passed: bool,
     pub out_path: Option<std::path::PathBuf>,
+    // preview-engine verification (black-screen regression test)
+    pub probe_ok: bool,
+    pub still_ok: bool,
+    pub play_ok: bool,
+    pub pts0: Option<f64>,
 }
 
 impl SelfTest {
@@ -24,6 +29,7 @@ impl SelfTest {
             step: 0, t0: Instant::now(), step_t: Instant::now(),
             export_wait: None, lines: Vec::new(), finished: false, passed: false,
             out_path: None,
+            probe_ok: false, still_ok: false, play_ok: false, pts0: None,
         }
     }
 
@@ -191,13 +197,58 @@ impl SelfTest {
                         let size_ok = std::fs::metadata(p).map(|m| m.len() > 10_000).unwrap_or(false);
                         self.log(format!("probe: {:.2}s video={} audio={} size_ok={size_ok}",
                             info.duration, info.has_video, info.has_audio));
-                        self.passed = dur_ok && streams_ok && size_ok;
-                        if self.passed { self.log("SELFTEST PASS".into()); }
-                        else { self.fail("verification criteria not met"); }
-                        self.write_report(app);
-                        self.finished = true;
+                        self.probe_ok = dur_ok && streams_ok && size_ok;
+                        if !self.probe_ok { self.fail("verification criteria not met"); return; }
+                        self.log("probe PASS".into());
+                        self.next();
                     }
                     Err(e) => self.fail(&format!("probe failed: {e}")),
+                }
+            }
+            9 => {
+                // PREVIEW ENGINE (paused): a Still decoder must deliver a frame
+                // — regression test for the "black preview screen" bug
+                app.player.pause();
+                app.player.seek(4.5); // inside a clip, no boundary in the next 2s
+                if let Some(s) = app.player.slots.iter().find(|s| s.frame.is_some()) {
+                    if let Some(f) = &s.frame {
+                        self.still_ok = f.w > 2 && f.h > 2 && f.rgba.len() >= (f.w as usize) * (f.h as usize) * 4;
+                        self.log(format!("preview still frame OK ({}×{}, {}B rgba)", f.w, f.h, f.rgba.len()));
+                    }
+                    app.toggle_play(); // start playback for step 10
+                    self.pts0 = app.player.slots.iter().find_map(|s| s.frame.as_ref().map(|f| f.pts));
+                    self.next();
+                } else if self.timeout(20) {
+                    self.fail("preview produced no frame while paused (black screen)");
+                }
+            }
+            10 => {
+                // PREVIEW ENGINE (playing): frames must keep arriving
+                if self.step_t.elapsed() > Duration::from_secs_f64(2.0) {
+                    app.player.pause();
+                    let pts1 = app.player.slots.iter().find_map(|s| s.frame.as_ref().map(|f| f.pts));
+                    self.play_ok = match (self.pts0, pts1) {
+                        (Some(a), Some(b)) => b > a + 0.5,
+                        _ => false,
+                    };
+                    if self.play_ok {
+                        self.log(format!("playback frames advance OK (pts {:.2} → {:.2?})",
+                            self.pts0.unwrap_or(0.0), pts1));
+                    } else {
+                        let diag: Vec<String> = app.player.slots.iter().map(|s| format!(
+                            "t{} c{} dec={} eof={} err={:?} pts={:?} clk={:.2} origin={:.2}",
+                            s.track_id, s.clip_id, s.dec.is_some(), s.eof,
+                            s.decode_error, s.frame.as_ref().map(|f| f.pts),
+                            app.player.clock, s.origin_clock)).collect();
+                        self.fail(&format!("playback frames did not advance (playing={} clock={:.2} pts0={:?} pts1={pts1:?}) slots: {}",
+                            app.player.playing, app.player.clock, self.pts0,
+                            diag.join(" | ")));
+                        return;
+                    }
+                    self.passed = self.probe_ok && self.still_ok && self.play_ok;
+                    if self.passed { self.log("SELFTEST PASS".into()); }
+                    self.write_report(app);
+                    self.finished = true;
                 }
             }
             _ => self.finished = true,

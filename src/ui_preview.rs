@@ -9,6 +9,7 @@ use crate::player::Quality;
 use crate::ui_common::{draw_transformed, icon_btn, icon_toggle, upload_tex};
 use crate::ui_icons as ico;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Rounding, Sense, Vec2};
+use std::path::PathBuf;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(4.0);
@@ -49,8 +50,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .show_ui(ui, |ui| {
                 for qq in Quality::all() {
                     if ui.selectable_label(q == qq, egui::RichText::new(qq.label()).size(12.0)).clicked() {
-                        app.player.quality = Some(qq);
-                        app.player.slots.clear();
+                        app.player.quality = Some(qq); // key change restarts decoders, frame stays
                     }
                 }
             });
@@ -70,8 +70,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if sresp.dragged() || sresp.clicked() {
         if let Some(p) = sresp.interact_pointer_pos() {
             let t = ((p.x - sr.left()) / sr.width()).clamp(0.0, 1.0) as f64 * app.project.duration();
-            app.player.seek(t);
-            app.player.slots.clear();
+            app.player.seek(t); // Still mode regrabs per bucket; frame never blanks
         }
     }
 
@@ -87,11 +86,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         if icon_btn(app, ui, btn, &app.t(K::GoStart), ico::go_start).clicked() {
             app.player.seek(app.project.in_mark.unwrap_or(0.0));
-            app.player.slots.clear();
         }
         if icon_btn(app, ui, btn, &app.t(K::PrevFrame), ico::prev_frame).clicked() {
             app.player.seek(app.player.clock - 1.0 / app.project.fps);
-            app.player.slots.clear();
         }
         let playing = app.player.playing;
         if icon_toggle(app, ui, btn + 4.0, playing, &if playing { app.t(K::Pause) } else { app.t(K::Play) },
@@ -100,11 +97,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
         if icon_btn(app, ui, btn, &app.t(K::NextFrame), ico::next_frame).clicked() {
             app.player.seek(app.player.clock + 1.0 / app.project.fps);
-            app.player.slots.clear();
         }
         if icon_btn(app, ui, btn, &app.t(K::GoEnd), ico::go_end).clicked() {
             app.player.seek(app.project.out_mark.unwrap_or(app.project.duration()));
-            app.player.slots.clear();
         }
         ui.add_space(6.0);
         if icon_toggle(app, ui, btn, app.player.loop_play, &app.t(K::Loop), ico::loop_icon).clicked() {
@@ -130,79 +125,129 @@ fn snapshot(app: &mut App) {
     }
 }
 
-/// Composite all visible video layers (V1 bottom → V3 top) with transforms.
+/// Composite all visible video layers bottom→top (V1 first) with transforms,
+/// and surface decode state (error / still loading) instead of a silent
+/// black frame.
 fn draw_composite(app: &mut App, ui: &mut egui::Ui, vr: Rect) {
-    let fps = app.project.fps;
     let t = app.player.clock;
-    // upload slot frames to textures
-    let slots: Vec<(u64, u64, crate::decoder::Frame)> = app.player.slots.iter()
-        .filter_map(|s| s.frame.clone().map(|f| (s.track_id, s.clip_id, f)))
-        .collect();
-    let track_order: Vec<(u64, u64)> = app.project.tracks.iter()
-        .filter(|tr| tr.kind == TrackKind::Video)
-        .map(|tr| (tr.id, tr.id))
-        .collect();
-    let _ = track_order;
 
-    for (track_id, clip_id, frame) in &slots {
-        let key = *track_id as u64 * 1_000_003 + frame.w as u64 + frame.h as u64 * 7;
-        let tex = upload_tex(&mut app.tex_cache, ui.ctx(), key, frame.w, frame.h, &frame.rgba);
-        let Some((_, clip)) = app.project.clip(*clip_id) else { continue };
-        draw_transformed(ui.painter(), &tex, vr, &clip.transform);
-        let _ = fps;
+    // pass 1: gather what to draw per active video track (bottom→top order).
+    // Cloning frames out first avoids holding borrows across texture upload.
+    struct Layer {
+        transform: crate::model::Transform,
+        frame: Option<crate::decoder::Frame>,
+        err: Option<String>,
+        img: Option<PathBuf>,
+        title: Option<crate::model::TitleData>,
+        title_id: u64,
+        drew_kind: u8, // 0 video · 1 image · 2 title
     }
-
-    // image clips
+    let mut layers: Vec<Layer> = Vec::new();
     for tr in app.project.tracks.iter().filter(|tr| tr.kind == TrackKind::Video && !tr.hidden) {
         let Some(c) = tr.clips.iter().find(|c| t >= c.tl_start && t < c.end()) else { continue };
-        if c.kind == ClipKind::Image {
-            if let Some(src) = c.source.clone() {
-                if !app.big_imgs.contains_key(&src) {
-                    if let Ok(img) = image::open(&src) {
-                        let rgba = img.to_rgba8();
-                        let (w, h) = (rgba.width(), rgba.height());
-                        let tex = ui.ctx().load_texture(format!("img:{}", src.display()),
-                            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw()),
-                            egui::TextureOptions::LINEAR);
-                        app.big_imgs.insert(src.clone(), tex);
-                    }
-                }
-                if let Some(tex) = app.big_imgs.get(&src) {
-                    draw_transformed(ui.painter(), tex, vr, &c.transform);
-                }
-            }
-        }
-        // title clips rendered via text rasterizer (same path as export)
-        if let Some(td) = c.title.clone() {
-            if c.kind == ClipKind::Title {
-                let cache_key = c.id;
-                let want_text = td.text.clone();
-                let w = (vr.width() as u32).min(1280) & !1;
-                let h = (vr.height() as u32).min(720) & !1;
-                let needs = match app.title_tex.get(&cache_key) {
-                    Some((txt, tex)) => txt != &want_text || tex.size()[0] as u32 != w,
-                    None => true,
+        match c.kind {
+            ClipKind::Video => {
+                let (frame, err) = match app.player.slots.iter().find(|s| s.track_id == tr.id) {
+                    Some(s) => (s.frame.clone(), s.decode_error.clone()),
+                    None => (None, None),
                 };
-                if needs {
-                    if let Ok(png) = exporter::render_text_png(&td.text, td.size * (w as f32 / 1920.0), td.color, w, h) {
-                        if let Ok(img) = image::load_from_memory(&png) {
-                            let rgba = img.to_rgba8();
-                            let tex = ui.ctx().load_texture(format!("title:{cache_key}"),
-                                egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()),
-                                egui::TextureOptions::LINEAR);
-                            app.title_tex.insert(cache_key, (want_text, tex));
-                        }
-                    }
-                }
-                if let Some((_, tex)) = app.title_tex.get(&cache_key) {
-                    draw_transformed(ui.painter(), tex, vr, &c.transform);
-                }
+                layers.push(Layer {
+                    transform: c.transform.clone(), frame, err,
+                    img: None, title: None, title_id: c.id, drew_kind: 0,
+                });
             }
+            ClipKind::Image => {
+                layers.push(Layer {
+                    transform: c.transform.clone(), frame: None, err: None,
+                    img: c.source.clone(), title: None, title_id: c.id, drew_kind: 1,
+                });
+            }
+            ClipKind::Title => {
+                layers.push(Layer {
+                    transform: c.transform.clone(), frame: None, err: None,
+                    img: None, title: c.title.clone(), title_id: c.id, drew_kind: 2,
+                });
+            }
+            ClipKind::Audio => {}
         }
     }
 
-    // empty hint
-    if slots.is_empty() && !app.project.tracks.iter().flat_map(|tr| &tr.clips).any(|c| c.is_visual()) {
+    let mut drew_any = false;
+    let mut decode_err: Option<String> = None;
+    let mut waiting_decode = false;
+    for l in &layers {
+        if let Some(e) = &l.err { decode_err = Some(e.clone()); }
+        match l.drew_kind {
+            0 => {
+                if let Some(f) = &l.frame {
+                    let key = l.title_id.wrapping_mul(1_000_003) ^ (f.w as u64) ^ ((f.h as u64) << 20);
+                    let tex = upload_tex(&mut app.tex_cache, ui.ctx(), key, f.w, f.h, &f.rgba);
+                    draw_transformed(ui.painter(), &tex, vr, &l.transform);
+                    drew_any = true;
+                } else if l.err.is_none() {
+                    waiting_decode = true; // active clip, no frame yet
+                }
+            }
+            1 => {
+                if let Some(src) = &l.img {
+                    if !app.big_imgs.contains_key(src) {
+                        if let Ok(img) = image::open(src) {
+                            let rgba = img.to_rgba8();
+                            let (w, h) = (rgba.width(), rgba.height());
+                            let tex = ui.ctx().load_texture(format!("img:{}", src.display()),
+                                egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], rgba.as_raw()),
+                                egui::TextureOptions::LINEAR);
+                            app.big_imgs.insert(src.clone(), tex);
+                        }
+                    }
+                    if let Some(tex) = app.big_imgs.get(src) {
+                        draw_transformed(ui.painter(), tex, vr, &l.transform);
+                        drew_any = true;
+                    }
+                }
+            }
+            2 => {
+                if let Some(td) = &l.title {
+                    let cache_key = l.title_id;
+                    let want_text = td.text.clone();
+                    let w = (vr.width() as u32).min(1280) & !1;
+                    let h = (vr.height() as u32).min(720) & !1;
+                    let needs = match app.title_tex.get(&cache_key) {
+                        Some((txt, tex)) => txt != &want_text || tex.size()[0] as u32 != w,
+                        None => true,
+                    };
+                    if needs {
+                        if let Ok(png) = exporter::render_text_png(&td.text, td.size * (w as f32 / 1920.0), td.color, w, h) {
+                            if let Ok(img) = image::load_from_memory(&png) {
+                                let rgba = img.to_rgba8();
+                                let tex = ui.ctx().load_texture(format!("title:{cache_key}"),
+                                    egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()),
+                                    egui::TextureOptions::LINEAR);
+                                app.title_tex.insert(cache_key, (want_text, tex));
+                            }
+                        }
+                    }
+                    if let Some((_, tex)) = app.title_tex.get(&cache_key) {
+                        draw_transformed(ui.painter(), tex, vr, &l.transform);
+                        drew_any = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // overlays: decode state must never be a silent black screen
+    if let Some(e) = decode_err {
+        let msg: String = if e.len() > 220 { format!("{}…", &e[..220]) } else { e.clone() };
+        ui.painter().text(vr.center(), Align2::CENTER_CENTER,
+            format!("Decode failed\n{msg}"), FontId::proportional(12.5),
+            Color32::from_rgb(255, 110, 110));
+        ui.painter().rect_filled(vr, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 140));
+    } else if !drew_any && waiting_decode {
+        ui.painter().text(vr.center(), Align2::CENTER_CENTER, "Decoding…",
+            FontId::proportional(13.0), Color32::from_rgb(120, 120, 132));
+    } else if !drew_any && !app.project.tracks.iter().flat_map(|tr| &tr.clips).any(|c| c.is_visual()) {
         ui.painter().text(vr.center(), Align2::CENTER_CENTER, &app.t(K::Empty),
             FontId::proportional(14.0), Color32::from_rgb(70, 70, 78));
     }

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
 use std::time::{Duration, Instant};
 
+#[derive(Clone)]
 pub struct DecoderReq {
     pub path: PathBuf,
     pub src_in: f64,
@@ -18,7 +19,13 @@ pub struct DecoderReq {
     pub w: u32,
     pub h: u32,
     pub fps: f64,
+    /// Still = grab exactly one frame (paused / scrubbing, fast seek).
+    /// Run  = stream continuously paced at `fps` (playback).
+    pub mode: DecodeMode,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DecodeMode { Still, Run }
 
 #[derive(Clone)]
 pub struct Frame {
@@ -42,30 +49,55 @@ pub struct Decoder {
     pub src_in: f64,
     latest: Option<Frame>,
     eof: bool,
+    pub last_error: Option<String>,
 }
 
 impl Decoder {
     pub fn start(req: DecoderReq) -> Result<Decoder, String> {
         let bin = media::ffmpeg().ok_or_else(|| "ffmpeg not found".to_string())?;
-        let mut child = Command::new(bin)
-            .args([
-                "-hide_banner", "-loglevel", "error", "-hwaccel", "auto",
-                "-ss", &format!("{:.3}", req.src_in.max(0.0)),
-                "-i", &req.path.to_string_lossy(),
-                "-an",
-                "-vf", &req.filters,
-                "-f", "rawvideo",
-                "-pix_fmt", "rgba",
-                "pipe:1",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("decoder spawn: {e}"))?;
+        let mut cmd = Command::new(bin);
+        cmd.args([
+            "-hide_banner", "-loglevel", "error", "-hwaccel", "auto",
+            "-ss", &format!("{:.3}", req.src_in.max(0.0)),
+            "-i", &req.path.to_string_lossy(),
+            "-an",
+            "-vf", &req.filters,
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "pipe:1",
+        ]);
+        if req.mode == DecodeMode::Still {
+            cmd.args(["-frames:v", "1"]);
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("decoder spawn: {e}"))?;
 
         let stdout = child.stdout.take().ok_or("no stdout")?;
+        let stderr = child.stderr.take();
+        // capture the ffmpeg error tail so failures can be shown in the UI
+        let err_tail: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+        if let Some(mut se) = stderr {
+            let tail = err_tail.clone();
+            std::thread::Builder::new().name("decerr".into()).spawn(move || {
+                let mut buf = [0u8; 512];
+                let mut acc = String::new();
+                loop {
+                    match se.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            acc.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            // keep only the tail
+                            if acc.len() > 800 { let cut = acc.len() - 800; acc = acc.split_off(cut); }
+                            if let Ok(mut t) = tail.lock() { *t = acc.clone(); }
+                        }
+                    }
+                }
+            }).ok();
+        }
+
         let (tx, rx) = sync_channel::<DecEvent>(4);
         let (w, h, fps) = (req.w.max(2), req.h.max(2), req.fps.max(1.0));
+        let still = req.mode == DecodeMode::Still;
         std::thread::Builder::new().name("decoder".into()).spawn(move || {
             let mut pipe = stdout;
             let frame_len = (w as usize) * (h as usize) * 4;
@@ -73,16 +105,22 @@ impl Decoder {
             let t0 = Instant::now();
             let mut n = 0u64;
             loop {
-                // pacing: deliver frames at the sequence rate, not faster
-                let target = Duration::from_secs_f64(n as f64 / fps);
-                let elapsed = t0.elapsed();
-                if target > elapsed {
-                    std::thread::sleep(target - elapsed);
+                // pacing (Run mode only): deliver frames at the sequence rate
+                if !still {
+                    let target = Duration::from_secs_f64(n as f64 / fps);
+                    let elapsed = t0.elapsed();
+                    if target > elapsed {
+                        std::thread::sleep(target - elapsed);
+                    }
                 }
                 match read_exact_or_eof(&mut pipe, &mut buf) {
                     Ok(true) => {}
-                    Ok(false) => { let _ = tx.send(DecEvent::Eof); break; }
-                    Err(_) => { let _ = tx.send(DecEvent::Failed("pipe error".into())); break; }
+                    Ok(false) => { break; }
+                    Err(_) => {
+                        let tail = err_tail.lock().ok().map(|m| m.trim().to_string()).unwrap_or_default();
+                        let _ = tx.send(DecEvent::Failed(if tail.is_empty() { "pipe error".into() } else { tail }));
+                        break;
+                    }
                 }
                 let frame = Frame {
                     pts: n as f64 / fps,
@@ -91,11 +129,20 @@ impl Decoder {
                 };
                 if tx.send(DecEvent::Frame(frame)).is_err() { break; }
                 n += 1;
+                if still { break; } // one frame is all we need
             }
-            let _ = tx.send(DecEvent::Eof);
+            if n == 0 {
+                let tail = err_tail.lock().ok().map(|m| m.trim().to_string()).unwrap_or_default();
+                let msg = if tail.is_empty() {
+                    "no video output (end of stream before first frame)".to_string()
+                } else { tail };
+                let _ = tx.send(DecEvent::Failed(msg));
+            } else if !still {
+                let _ = tx.send(DecEvent::Eof);
+            }
         }).map_err(|e| e.to_string())?;
 
-        Ok(Decoder { child: Some(child), rx, w, h, src_in: req.src_in, latest: None, eof: false })
+        Ok(Decoder { child: Some(child), rx, w, h, src_in: req.src_in, latest: None, eof: false, last_error: None })
     }
 
     /// Drain events; returns the newest frame (stale ones are dropped —
@@ -105,7 +152,7 @@ impl Decoder {
             match self.rx.try_recv() {
                 Ok(DecEvent::Frame(f)) => { self.latest = Some(f); }
                 Ok(DecEvent::Eof) => { self.eof = true; break; }
-                Ok(DecEvent::Failed(_)) => { self.eof = true; break; }
+                Ok(DecEvent::Failed(msg)) => { self.eof = true; self.last_error = Some(msg); break; }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => { self.eof = true; break; }
             }

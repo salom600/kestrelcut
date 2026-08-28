@@ -22,10 +22,26 @@ impl Tool {
 pub struct Slot {
     pub track_id: u64,
     pub clip_id: u64,
-    pub key: u64, // (clip, src-time-bucket, filters, quality)
+    pub key: u64, // (clip, filters, quality, mode) — NOT time bucket
     pub dec: Option<Decoder>,
     pub frame: Option<Frame>,
     pub eof: bool,
+    /// Player clock when the running decoder was started (Run drift check).
+    pub origin_clock: f64,
+    /// seek_gen at decoder start; mismatch = user seeked → restart Run.
+    pub seek_gen: u64,
+    /// Frame-time bucket of the last Still grab (paused scrubbing).
+    pub still_bucket: u64,
+    /// Last decode failure message (shown in the preview overlay).
+    pub decode_error: Option<String>,
+    /// True when `frame` came from the CURRENT decoder generation (a frame
+    /// kept across a restart is stale — its pts must not drive drift checks).
+    pub frame_current: bool,
+    /// Wall time of the last frame delivery from the current decoder (stall
+    /// detection) — `None` until the first frame arrives.
+    pub last_frame_at: Option<std::time::Instant>,
+    /// Wall time when the current decoder was started.
+    pub started_at: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -39,12 +55,17 @@ pub struct Player {
     pub audio: Option<Monitor>,
     pub audio_clip: Option<u64>,
     pub last_frame_for_scopes: Option<(u32, u32, std::sync::Arc<Vec<u8>>)>,
+    /// Bumped on every seek; lets Run decoders detect user seeks.
+    pub seek_gen: u64,
+    /// True once the engine produced at least one preview frame.
+    pub ever_had_frame: bool,
 }
 
 impl Player {
     pub fn new() -> Self {
         Self { playing: false, clock: 0.0, speed: 1.0, loop_play: false, quality: None,
-               slots: Vec::new(), audio: None, audio_clip: None, last_frame_for_scopes: None }
+               slots: Vec::new(), audio: None, audio_clip: None, last_frame_for_scopes: None,
+               seek_gen: 0, ever_had_frame: false }
     }
 
     /// Advance the playback clock. Returns true when playback ended.
@@ -66,7 +87,11 @@ impl Player {
 
     pub fn toggle_play(&mut self) { self.playing = !self.playing; }
     pub fn pause(&mut self) { self.playing = false; }
-    pub fn seek(&mut self, t: f64) { self.clock = t.max(0.0); }
+    pub fn seek(&mut self, t: f64) {
+        let nt = t.max(0.0);
+        if nt != self.clock { self.seek_gen = self.seek_gen.wrapping_add(1); }
+        self.clock = nt;
+    }
 
     pub fn slot_for(&mut self, track_id: u64) -> Option<&mut Slot> {
         self.slots.iter_mut().find(|s| s.track_id == track_id)

@@ -1,6 +1,6 @@
 //! Application core: state, media orchestration, decode slots, persistence.
 
-use crate::decoder::{Decoder, DecoderReq};
+use crate::decoder::{DecodeMode, Decoder, DecoderReq};
 use crate::exporter::{self, ExportSpec};
 use crate::i18n::K;
 use crate::media::{self, MediaEvent, MediaInfo};
@@ -163,6 +163,13 @@ pub struct App {
     pub pool_tab: usize,
     pub pool_filter: u8, // 0 all · 1 video · 2 audio · 3 image
     pub pending_seek: Option<f64>,
+    /// Wall-clock timestamp of the previous UI frame — real-time playback
+    /// clock source (stable_dt drifts under slow software rendering, which
+    /// desynced the decoders and caused constant reseek restarts).
+    pub last_real: Option<Instant>,
+    /// `--play` flag: start playback automatically once the demo timeline
+    /// is built (used by CI screenshots and hands-free verification).
+    pub autoplay: bool,
 }
 
 // ------------------------------------------------------------------ init
@@ -210,6 +217,8 @@ impl App {
             pool_tab: 0,
             pool_filter: 0,
             pending_seek: None,
+            last_real: None,
+            autoplay: false,
         };
         app.player.quality = Some(Quality::Half);
         if !media::ffmpeg_ok() {
@@ -546,9 +555,23 @@ impl App {
     }
 
     // ------------------------------------------------------------ player
+    /// Playback engine state machine.
+    ///
+    /// - Paused  → one `Still` decoder per active video track grabs a single
+    ///   frame at the current position (fast seek); the previous frame stays
+    ///   visible until the fresh one arrives, so scrubbing never goes black.
+    /// - Playing → one `Run` decoder per active video track streams frames
+    ///   paced at (fps × clip-speed × playback-speed); drift vs the playback
+    ///   clock triggers a reseek only when it exceeds 0.6 s. Decoders are NOT
+    ///   restarted per frame — that was the cause of the old black preview.
+    /// - Decode failures are captured and surfaced in the preview overlay.
     pub fn update_player(&mut self, _ctx: &egui::Context) {
         let fps = self.project.fps;
         let q = self.player.quality.unwrap_or(Quality::Half);
+        let playing = self.player.playing;
+        let mode = if playing { DecodeMode::Run } else { DecodeMode::Still };
+        let gen = self.player.seek_gen;
+        let speed = self.player.speed as f64;
         if let Some(ts) = self.preview_dirty {
             if Instant::now() >= ts { self.preview_dirty = None; self.apply_preview_dirty(); }
         }
@@ -557,12 +580,12 @@ impl App {
             track: u64,
             clip_id: u64,
             key: u64,
+            src_in: f64,
             req: Option<DecoderReq>,
-            title: Option<Clip>,
-            image: Option<PathBuf>,
         }
         let mut wants: Vec<Want> = Vec::new();
         let t = self.player.clock;
+        let bucket_now = bucket(t, fps);
         let aspect = self.project.width as f32 / self.project.height.max(1) as f32;
         let mut ph = (self.project.height as f32 * q.factor()).clamp(90.0, 720.0);
         let mut pw = ph * aspect;
@@ -571,53 +594,103 @@ impl App {
 
         for tr in self.project.tracks.iter().filter(|tr| tr.kind == TrackKind::Video && !tr.hidden) {
             let Some(c) = tr.clips.iter().find(|c| t >= c.tl_start && t < c.end()) else { continue };
+            if c.kind != crate::model::ClipKind::Video { continue; }
             let rel = (t - c.tl_start) * c.speed as f64;
             let src_t = c.src_in + rel;
             let src_path = c.source.clone().unwrap_or_default();
-            match c.kind {
-                crate::model::ClipKind::Video => {
-                    let filters = media::video_filter_chain(&c.grade, &c.fx, c.src_dur, Some(pw), Some(ph), Some(fps));
-                    let key = hash_key(&[c.id, bucket(src_t, fps), fnv(&filters), q as u64]);
-                    wants.push(Want {
-                        track: tr.id, clip_id: c.id, key,
-                        req: Some(DecoderReq { path: src_path, src_in: src_t, filters, w: pw, h: ph, fps }),
-                        title: None, image: None,
-                    });
-                }
-                crate::model::ClipKind::Image => {
-                    wants.push(Want { track: tr.id, clip_id: c.id, key: hash_key(&[c.id, 7, 7, 7]), req: None, title: None, image: Some(src_path) });
-                }
-                crate::model::ClipKind::Title => {
-                    wants.push(Want { track: tr.id, clip_id: c.id, key: hash_key(&[c.id, 9, 9, 9]), req: None, title: Some(c.clone()), image: None });
-                }
-                crate::model::ClipKind::Audio => {}
-            }
+            let filters = media::video_filter_chain(&c.grade, &c.fx, c.src_dur, Some(pw), Some(ph), Some(fps));
+            let key = hash_key(&[c.id, fnv(&filters), q as u64, mode as u64]);
+            // pacing rate: frames per wall-second — project fps scaled by clip
+            // speed (source consumed faster/slower) and playback speed
+            let rate = (fps * (c.speed as f64).max(0.01) * speed).max(1.0);
+            wants.push(Want {
+                track: tr.id, clip_id: c.id, key, src_in: src_t,
+                req: Some(DecoderReq { path: src_path, src_in: src_t, filters, w: pw, h: ph, fps: rate, mode }),
+            });
         }
 
         let want_tracks: Vec<u64> = wants.iter().map(|w| w.track).collect();
         self.player.slots.retain(|s| want_tracks.contains(&s.track_id));
         for w in wants {
             if let Some(slot) = self.player.slots.iter_mut().find(|s| s.track_id == w.track) {
-                if slot.key != w.key {
-                    slot.dec = w.req.and_then(|r| Decoder::start(r).ok());
+                let clip_changed = slot.clip_id != w.clip_id;
+                let key_changed = slot.key != w.key;
+                let seeked = slot.seek_gen != gen;
+                let mut need_restart = key_changed || seeked;
+                if !need_restart {
+                    if playing {
+                        // Playback is decode-limited best-effort (like dropped
+                        // frames in real NLEs): a heavy filter chain may lag
+                        // the wall clock, which must NOT trigger restarts.
+                        // Restart only on a genuine stall (no frames from the
+                        // current decoder) or a huge seek-induced drift.
+                        let stalled = match slot.last_frame_at {
+                            Some(lf) => lf.elapsed() > Duration::from_secs(2),
+                            None => slot.started_at.elapsed() > Duration::from_secs(4),
+                        };
+                        let big_drift = slot.frame_current && slot.eof != true
+                            && slot.frame.as_ref()
+                                .map(|f| (t - slot.origin_clock - f.pts * speed).abs() > 3.0)
+                                .unwrap_or(false);
+                        if (stalled && !slot.eof) || big_drift { need_restart = true; }
+                    } else if slot.still_bucket != bucket_now {
+                        need_restart = true;
+                    }
+                }
+                if need_restart {
+                    if std::env::var("KC_TRACE").is_ok() {
+                        eprintln!("[trace] restart track={} clip={} reason={}{}{} clk={t:.3} src_in={:.3} key={:x}→{:x} gen {}→{}",
+                            w.track, w.clip_id,
+                            if key_changed { "KEY " } else { "" },
+                            if seeked { "SEEK " } else { "" },
+                            if !key_changed && !seeked { "DRIFT" } else { "" },
+                            w.src_in, slot.key, w.key, slot.seek_gen, gen);
+                    }
+                    match w.req.clone().map(Decoder::start) {
+                        Some(Ok(d)) => {
+                            slot.dec = Some(d);
+                            slot.decode_error = None;
+                            if clip_changed { slot.frame = None; } // new content
+                        }
+                        Some(Err(e)) => { slot.dec = None; slot.decode_error = Some(e); }
+                        None => { slot.dec = None; }
+                    }
                     slot.clip_id = w.clip_id;
                     slot.key = w.key;
-                    slot.frame = None;
                     slot.eof = false;
+                    slot.origin_clock = t;
+                    slot.seek_gen = gen;
+                    slot.still_bucket = bucket_now;
+                    slot.frame_current = false; // carried frame is from the old gen
+                    slot.last_frame_at = None;
+                    slot.started_at = Instant::now();
                 }
             } else {
-                let dec = w.req.and_then(|r| Decoder::start(r).ok());
+                let (dec, err) = match w.req.clone().map(Decoder::start) {
+                    Some(Ok(d)) => (Some(d), None),
+                    Some(Err(e)) => (None, Some(e)),
+                    None => (None, None),
+                };
                 self.player.slots.push(Slot {
                     track_id: w.track, clip_id: w.clip_id, key: w.key, dec, frame: None, eof: false,
+                    origin_clock: t, seek_gen: gen, still_bucket: bucket_now, decode_error: err,
+                    frame_current: false, last_frame_at: None, started_at: Instant::now(),
                 });
             }
         }
 
         for s in self.player.slots.iter_mut() {
             if let Some(dec) = s.dec.as_mut() {
-                if let Some(f) = dec.poll() { s.frame = Some(f); }
+                if let Some(f) = dec.poll() {
+                    s.frame = Some(f); s.frame_current = true; s.decode_error = None;
+                    s.last_frame_at = Some(Instant::now());
+                }
+                if let Some(e) = &dec.last_error { s.decode_error = Some(e.clone()); }
                 if dec.is_eof() { s.eof = true; }
             }
+        }
+        if self.player.slots.iter().any(|s| s.frame.is_some()) {
+            self.player.ever_had_frame = true;
         }
 
         #[cfg(feature = "audio")]
@@ -735,12 +808,13 @@ impl App {
     pub fn toggle_play(&mut self) {
         if self.player.playing {
             self.player.pause();
-            for s in &mut self.player.slots { s.dec = None; } // kill decoders, keep last frame
             self.player.audio = None;
             self.player.audio_clip = None;
+            // decoders switch to Still mode on the next tick; the last frame
+            // stays visible so pause never blanks the preview
         } else {
-            self.player.slots.clear(); // fresh decoders at current position
             self.player.playing = true;
+            // decoders switch to Run mode on the next tick via key change
         }
     }
 

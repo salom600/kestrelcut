@@ -20,7 +20,15 @@ impl eframe::App for App {
         self.poll_events(ctx);
         self.handle_shortcuts(ctx);
 
-        let dt = ctx.input(|i| i.stable_dt) as f64;
+        // real-time playback clock: measure actual wall delta between UI
+        // frames instead of egui's smoothed stable_dt — decoders pace in real
+        // time, so the clock must too (drift otherwise triggers constant
+        // decoder restarts and a stalled/black preview on slow renderers)
+        let now = Instant::now();
+        let dt = self.last_real.map(|t0| (now - t0).as_secs_f64())
+            .unwrap_or(1.0 / 60.0)
+            .clamp(0.0, 1.0); // guard absurd gaps (suspend); drift-reseek handles the rest
+        self.last_real = Some(now);
         let dur = self.project.duration();
         if self.player.tick(dt, dur, self.project.in_mark, self.project.out_mark) {
             self.toggle_play();
@@ -28,6 +36,9 @@ impl eframe::App for App {
         self.update_player(ctx);
         if self.demo_build_pending {
             self.try_build_demo_timeline();
+        } else if self.autoplay {
+            self.autoplay = false;
+            self.toggle_play(); // --play: prove the preview renders live video
         }
         if self.selftest.is_some() {
             let mut st = self.selftest.take();

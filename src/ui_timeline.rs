@@ -283,10 +283,10 @@ pub fn canvas_ui(app: &mut App, ui: &mut egui::Ui, canvas: Rect) {
         if let Some(pt) = pos {
             let in_ruler = pt.y < canvas.top() + RULER_H;
             if in_ruler && app.drag.is_none() {
-                // scrub
+                // scrub — Still mode regrabs per bucket; the last frame stays
+                // visible so scrubbing never flashes black
                 let t = t0 + (pt.x - canvas.left()).max(0.0) as f64 / app.zoom;
                 app.player.seek(t.min(seq_dur));
-                app.player.slots.clear();
             } else {
                 drag_update(app, pt, canvas);
             }
