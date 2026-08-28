@@ -6,5 +6,5 @@ Comment=Feather-light cross-platform video editor
 Exec=kestrelcut %f
 Icon=kestrelcut
 Terminal=false
-Categories=AudioVideo;Video;Editor;
+Categories=AudioVideo;Video;
 Keywords=video;editor;montage;cut;

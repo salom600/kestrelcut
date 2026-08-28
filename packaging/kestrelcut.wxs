@@ -12,9 +12,12 @@
     </Feature>
   </Product>
   <Fragment>
-    <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="KestrelCut"/>
-    </StandardDirectory>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="KestrelCut"/>
+      </Directory>
+      <Directory Id="ProgramMenuFolder"/>
+    </Directory>
     <ComponentGroup Id="MainComponents">
       <Component Directory="INSTALLFOLDER" Id="MainExe" Guid="*">
         <File Id="KestrelCutExe" Source="$(var.ExePath)" KeyPath="yes" Name="kestrelcut.exe"/>
