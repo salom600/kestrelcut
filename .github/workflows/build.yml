@@ -99,8 +99,13 @@ jobs:
         run: |
           V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           chmod +x dist/kestrelcut_${V}_amd64.AppImage
-          ./dist/kestrelcut_${V}_amd64.AppImage --appimage-extract ffmpeg >/dev/null 2>&1 || true
-          test -f squashfs-root/usr/bin/ffmpeg
+          ./dist/kestrelcut_${V}_amd64.AppImage --appimage-extract >/dev/null 2>&1
+          test -f squashfs-root/usr/bin/ffmpeg || { echo "ffmpeg missing from AppImage"; exit 1; }
+          test -f squashfs-root/usr/bin/ffprobe || { echo "ffprobe missing from AppImage"; exit 1; }
+          # run the AppImage's exact payload offline (empty PATH)
+          OUT=$(env -i HOME="$HOME" PATH=/nonexistent ./squashfs-root/usr/bin/kestrelcut --where)
+          echo "$OUT"
+          echo "$OUT" | grep -q "bundled with KestrelCut"
           rm -rf squashfs-root
           du -h dist/kestrelcut_${V}_amd64.AppImage dist/kestrelcut_${V}_amd64.deb
 
