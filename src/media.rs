@@ -52,6 +52,11 @@ fn bundled_dirs() -> Vec<PathBuf> {
             v.push(dir.to_path_buf());          // ffmpeg next to the binary
             v.push(dir.join("bin"));            // ffmpeg/bin layout
             v.push(dir.join("ffmpeg"));         // ffmpeg/ffmpeg.exe layout
+            // staged/extracted .deb layout: <root>/usr/bin -> <root>/usr/lib/kestrelcut/bin
+            if let Some(root) = dir.parent() {
+                v.push(root.join("usr/lib/kestrelcut/bin"));
+                v.push(root.join("lib/kestrelcut/bin"));
+            }
         }
     }
     // Linux distro packages must not collide with system ffmpeg in /usr/bin
