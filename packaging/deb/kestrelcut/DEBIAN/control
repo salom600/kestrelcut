@@ -3,10 +3,11 @@ Version: 0.1.0
 Section: video
 Priority: optional
 Architecture: amd64
-Depends: ffmpeg, libasound2, libxkbcommon-x11-0, libx11-6, libxcursor1, libxrandr2, libxi6
+Depends: libasound2, libxkbcommon-x11-0, libx11-6, libxcursor1, libxrandr2, libxi6
+Recommends: ffmpeg
 Maintainer: salom600 <salom600@users.noreply.github.com>
 Homepage: https://github.com/salom600/kestrelcut
 Description: KestrelCut - feather-light, crash-proof cross-platform video editor
  Professional non-linear video editing with GPU-accelerated UI, hardware
- accelerated H.264/H.265/AV1 export, proxy workflows for low-spec machines,
- and an Arabic/English bilingual interface.
+ accelerated H.264/H.265/AV1 export, real color wheels and scopes, proxy
+ workflows for low-spec machines. FFmpeg is bundled — works offline.

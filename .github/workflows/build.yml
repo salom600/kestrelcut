@@ -67,7 +67,7 @@ jobs:
         run: |
           V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           ROOT=packaging/deb/kestrelcut
-          rm -rf $ROOT
+          rm -rf $ROOT/usr
           mkdir -p $ROOT/usr/bin $ROOT/usr/lib/kestrelcut/bin \
                    $ROOT/usr/share/applications $ROOT/usr/share/icons/hicolor/256x256/apps
           install -m 755 target/release/kestrelcut $ROOT/usr/bin/kestrelcut
