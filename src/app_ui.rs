@@ -30,9 +30,10 @@ impl eframe::App for App {
             .clamp(0.0, 1.0); // guard absurd gaps (suspend); drift-reseek handles the rest
         self.last_real = Some(now);
         let dur = self.project.duration();
-        if self.player.tick(dt, dur, self.project.in_mark, self.project.out_mark) {
-            self.toggle_play();
-        }
+        // tick() pauses itself at the end (playing=false + returns true);
+        // calling toggle_play() here would RE-START playback and pin the
+        // playhead at the end frame in a play/stop flip-flop.
+        let _ended = self.player.tick(dt, dur, self.project.in_mark, self.project.out_mark);
         self.update_player(ctx);
         if self.demo_build_pending {
             self.try_build_demo_timeline();

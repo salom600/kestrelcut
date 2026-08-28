@@ -610,8 +610,13 @@ impl App {
         }
 
         let want_tracks: Vec<u64> = wants.iter().map(|w| w.track).collect();
-        self.player.slots.retain(|s| want_tracks.contains(&s.track_id));
-        for w in wants {
+        // Freeze at the end: paused at/after the sequence end with no active
+        // clip, real NLEs hold the last decoded frame instead of going black.
+        let at_end = t >= self.project.duration() - 1e-6;
+        let freeze_end = !playing && at_end && want_tracks.is_empty() && !self.player.slots.is_empty();
+        if !freeze_end {
+            self.player.slots.retain(|s| want_tracks.contains(&s.track_id));
+            for w in wants {
             if let Some(slot) = self.player.slots.iter_mut().find(|s| s.track_id == w.track) {
                 let clip_changed = slot.clip_id != w.clip_id;
                 let key_changed = slot.key != w.key;
@@ -677,7 +682,8 @@ impl App {
                     frame_current: false, last_frame_at: None, started_at: Instant::now(),
                 });
             }
-        }
+            }
+        } // !freeze_end
 
         for s in self.player.slots.iter_mut() {
             if let Some(dec) = s.dec.as_mut() {
@@ -813,6 +819,12 @@ impl App {
             // decoders switch to Still mode on the next tick; the last frame
             // stays visible so pause never blanks the preview
         } else {
+            // play pressed at/after the end → restart from the in-point
+            let dur = self.project.duration();
+            if dur > 0.0 && self.player.clock >= dur - 1e-6 {
+                let t0 = self.project.in_mark.unwrap_or(0.0);
+                self.player.seek(if t0 < dur - 1e-6 { t0 } else { 0.0 });
+            }
             self.player.playing = true;
             // decoders switch to Run mode on the next tick via key change
         }

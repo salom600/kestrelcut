@@ -175,6 +175,19 @@ fn draw_composite(app: &mut App, ui: &mut egui::Ui, vr: Rect) {
     let mut drew_any = false;
     let mut decode_err: Option<String> = None;
     let mut waiting_decode = false;
+    // freeze: paused at/after sequence end with no active clip — hold the
+    // last decoded frame on screen instead of dropping to black
+    if layers.is_empty() && !app.player.playing {
+        for s in app.player.slots.iter().rev() {
+            if let Some(f) = &s.frame {
+                let key = s.track_id.wrapping_mul(1_000_003) ^ (f.w as u64) ^ ((f.h as u64) << 20);
+                let tex = upload_tex(&mut app.tex_cache, ui.ctx(), key, f.w, f.h, &f.rgba);
+                draw_transformed(ui.painter(), &tex, vr, &crate::model::Transform::default());
+                drew_any = true;
+                break; // topmost track's frame wins
+            }
+        }
+    }
     for l in &layers {
         if let Some(e) = &l.err { decode_err = Some(e.clone()); }
         match l.drew_kind {
