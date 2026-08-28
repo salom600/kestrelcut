@@ -161,7 +161,8 @@ pub mod audio {
 
     impl Monitor {
         pub fn start(path: PathBuf, src_in: f64, dur: f64) -> Option<Monitor> {
-            let device = cpal::default_output_device()?;
+            use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+            let device = cpal::default_host().default_output_device()?;
             let cfg = device.default_output_config().ok()?;
             let bin = media::ffmpeg()?;
             let mut child = Command::new(bin)
