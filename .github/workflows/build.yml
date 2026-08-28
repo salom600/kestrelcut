@@ -1,0 +1,156 @@
+name: Build (Windows + Linux)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: Linux (AppImage + .deb)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libasound2-dev file
+          ffmpeg -version | head -1
+
+      - name: Build (release)
+        run: cargo build --release --locked || cargo build --release
+
+      - name: Unit tests
+        run: cargo test --release --lib
+
+      - name: Generate app icon
+        run: |
+          ./target/release/kestrelcut --gen-icon dist/icon.png 256
+          ./target/release/kestrelcut --gen-icon dist/icon.ico 256
+
+      - name: Package .deb
+        run: |
+          mkdir -p dist
+          V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          ROOT=packaging/deb/kestrelcut
+          mkdir -p $ROOT/usr/bin $ROOT/usr/share/applications $ROOT/usr/share/icons/hicolor/256x256/apps
+          install -m 755 target/release/kestrelcut $ROOT/usr/bin/kestrelcut
+          cp packaging/kestrelcut.desktop $ROOT/usr/share/applications/kestrelcut.desktop
+          cp dist/icon.png $ROOT/usr/share/icons/hicolor/256x256/apps/kestrelcut.png
+          sed -i "s/^Version: .*/Version: $V/" $ROOT/DEBIAN/control
+          dpkg-deb --build --root-owner-group $ROOT dist/kestrelcut_${V}_amd64.deb
+
+      - name: Build AppImage
+        run: |
+          V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          curl -fL -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          install -m 755 target/release/kestrelcut AppDir/usr/bin/kestrelcut
+          cp packaging/kestrelcut.desktop AppDir/usr/share/applications/kestrelcut.desktop
+          cp dist/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/kestrelcut.png
+          ./linuxdeploy --appimage-extract-and-run --appdir AppDir --output appimage
+          mv KestrelCut-*.AppImage dist/kestrelcut_${V}_amd64.AppImage
+          mv dist/icon.png dist/kestrelcut_icon.png
+          mv dist/icon.ico dist/kestrelcut.ico
+
+      - name: Upload artifacts (every push)
+        uses: actions/upload-artifact@v4
+        with:
+          name: kestrelcut-linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+          if-no-files-found: error
+
+      - name: Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-ghrelease@v2
+        with:
+          files: |
+            dist/*.AppImage
+            dist/*.deb
+          generate_release_notes: true
+
+  build-windows:
+    name: Windows (.exe + .msi)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release --locked || cargo build --release
+
+      - name: Unit tests
+        run: cargo test --release --lib
+
+      - name: Generate app icon
+        shell: bash
+        run: |
+          mkdir -p dist
+          ./target/release/kestrelcut.exe --gen-icon dist/icon.png 256
+          ./target/release/kestrelcut.exe --gen-icon dist/icon.ico 256
+
+      - name: Package portable .zip
+        shell: pwsh
+        run: |
+          $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          New-Item -ItemType Directory -Force -Path dist/portable | Out-Null
+          Copy-Item target/release/kestrelcut.exe dist/portable/KestrelCut.exe
+          Copy-Item README.md dist/portable/ -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/portable/* -DestinationPath "dist/KestrelCut_${v}_win64_portable.zip" -Force
+          Copy-Item dist/icon.png dist/KestrelCut_icon.png -Force
+          Copy-Item dist/icon.ico dist/KestrelCut.ico -Force
+
+      - name: Build .msi (WiX)
+        shell: pwsh
+        run: |
+          $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          choco install wixtoolset -y --no-progress
+          $env:PATH += ";C:\Program Files (x86)\WiX Toolset v3.14\bin"
+          candle.exe packaging/kestrelcut.wxs `
+            -dExePath="$PWD\target\release\kestrelcut.exe" `
+            -dIcoPath="$PWD\dist\icon.ico" `
+            -arch x64 -o dist/kestrelcut.wixobj
+          light.exe dist/kestrelcut.wixobj -o "dist/KestrelCut_${v}_x64.msi" -ext WixUIExtension
+
+      - name: Upload artifacts (every push)
+        uses: actions/upload-artifact@v4
+        with:
+          name: kestrelcut-windows
+          path: |
+            dist/*.zip
+            dist/*.msi
+            dist/*.png
+            dist/*.ico
+          if-no-files-found: error
+
+      - name: Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-ghrelease@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.msi
+          generate_release_notes: true

@@ -1,0 +1,7 @@
+/target
+/dist
+*.AppImage
+*.deb
+*.msi
+selftest_report.json
+.kotlin/

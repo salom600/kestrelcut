@@ -1,0 +1,29 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="KestrelCut" Language="1033" Version="0.1.0.0"
+           Manufacturer="salom600" UpgradeCode="7C7A9B1E-52D4-4A8E-9F01-3B6C5D8E2A10">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine"
+             Description="KestrelCut — feather-light video editor" Manufacturer="salom600"/>
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed."/>
+    <MediaTemplate EmbedCab="yes"/>
+    <Property Id="ARPPRODUCTICON" Value="kc.ico"/>
+    <Feature Id="Main" Title="KestrelCut" Level="1">
+      <ComponentGroupRef Id="MainComponents"/>
+    </Feature>
+  </Product>
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="KestrelCut"/>
+    </StandardDirectory>
+    <ComponentGroup Id="MainComponents">
+      <Component Directory="INSTALLFOLDER" Id="MainExe" Guid="*">
+        <File Id="KestrelCutExe" Source="$(var.ExePath)" KeyPath="yes" Name="kestrelcut.exe"/>
+        <Shortcut Id="StartMenuKestrelCut" Name="KestrelCut" Directory="ProgramMenuFolder"
+                  WorkingDirectory="INSTALLFOLDER" Icon="kc.ico" Advertise="no"/>
+        <RegistryValue Root="HKCU" Key="Software\KestrelCut" Name="installed"
+                       Type="integer" Value="1" KeyPath="no"/>
+      </Component>
+    </ComponentGroup>
+    <Icon Id="kc.ico" SourceFile="$(var.IcoPath)"/>
+  </Fragment>
+</Wix>

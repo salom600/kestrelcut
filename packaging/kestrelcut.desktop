@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=KestrelCut
+GenericName=Video Editor
+Comment=Feather-light cross-platform video editor
+Exec=kestrelcut %f
+Icon=kestrelcut
+Terminal=false
+Categories=AudioVideo;Video;Editor;
+Keywords=video;editor;montage;cut;
