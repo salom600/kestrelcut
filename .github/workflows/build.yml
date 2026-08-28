@@ -80,12 +80,11 @@ jobs:
 
       - name: Release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-ghrelease@v2
-        with:
-          files: |
-            dist/*.AppImage
-            dist/*.deb
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.AppImage dist/*.deb --generate-notes || \
+            gh release upload "$GITHUB_REF_NAME" dist/*.AppImage dist/*.deb --clobber
 
   build-windows:
     name: Windows (.exe + .msi)
@@ -148,9 +147,8 @@ jobs:
 
       - name: Release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-ghrelease@v2
-        with:
-          files: |
-            dist/*.zip
-            dist/*.msi
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.msi --generate-notes || \
+            gh release upload "$GITHUB_REF_NAME" dist/*.zip dist/*.msi --clobber
