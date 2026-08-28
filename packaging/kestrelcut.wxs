@@ -22,9 +22,7 @@
       <Component Directory="INSTALLFOLDER" Id="MainExe" Guid="*">
         <File Id="KestrelCutExe" Source="$(var.ExePath)" KeyPath="yes" Name="kestrelcut.exe"/>
         <Shortcut Id="StartMenuKestrelCut" Name="KestrelCut" Directory="ProgramMenuFolder"
-                  WorkingDirectory="INSTALLFOLDER" Icon="kc.ico" Advertise="no"/>
-        <RegistryValue Root="HKCU" Key="Software\KestrelCut" Name="installed"
-                       Type="integer" Value="1" KeyPath="no"/>
+                  WorkingDirectory="INSTALLFOLDER" Advertise="yes"/>
       </Component>
     </ComponentGroup>
     <Icon Id="kc.ico" SourceFile="$(var.IcoPath)"/>
