@@ -2,7 +2,7 @@
 
 use crate::decoder::{Decoder, DecoderReq};
 use crate::exporter::{self, ExportSpec};
-use crate::i18n::{tx, K, Lang};
+use crate::i18n::K;
 use crate::media::{self, MediaEvent, MediaInfo};
 use crate::model::{Clip, History, MediaAsset, Project, TrackKind};
 use crate::player::{bucket, hash_key, Player, Quality, Slot, Tool};
@@ -14,8 +14,9 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 // ------------------------------------------------------------------ enums
+/// Real workspaces — every tab switches the panel arrangement.
 #[derive(Clone, Copy, PartialEq)]
-pub enum Workspace { Edit, Cut, Color, Audio, Fx, Media, Export, Learn }
+pub enum Workspace { Edit, Color, Audio, Fx, Export }
 
 #[derive(Clone)]
 pub struct FsState {
@@ -37,12 +38,12 @@ impl FsMode {
             FsMode::PickLut => vec!["cube"],
         }
     }
-    pub fn title(&self, lang: Lang) -> String {
+    pub fn title(&self) -> String {
         match self {
-            FsMode::OpenMedia => tx(lang, K::OpenMedia),
-            FsMode::OpenProject => tx(lang, K::OpenProject),
-            FsMode::SaveProject => tx(lang, K::SaveProject),
-            FsMode::SaveExport => tx(lang, K::OutputFile),
+            FsMode::OpenMedia => crate::i18n::tr(K::OpenMedia).to_string(),
+            FsMode::OpenProject => crate::i18n::tr(K::OpenProject).to_string(),
+            FsMode::SaveProject => crate::i18n::tr(K::SaveProject).to_string(),
+            FsMode::SaveExport => crate::i18n::tr(K::OutputFile).to_string(),
             FsMode::PickLut => "LUT (.cube)".into(),
         }
     }
@@ -111,7 +112,6 @@ pub enum Dialog {
 
 // ------------------------------------------------------------------ App
 pub struct App {
-    pub lang: Lang,
     pub theme: Theme,
     pub project: Project,
     pub hist: History,
@@ -125,11 +125,13 @@ pub struct App {
 
     pub player: Player,
     pub tool: Tool,
+    pub snap: bool,
     pub sel: Option<u64>,
     pub zoom: f64,
     pub scroll_t: f64,
     pub drag: Option<Drag>,
     pub workspace: Workspace,
+    pub scopes_visible: bool,
 
     pub thumbs: HashMap<PathBuf, Option<TextureHandle>>,
     pub big_imgs: HashMap<PathBuf, TextureHandle>,
@@ -159,12 +161,13 @@ pub struct App {
     pub settings_path: PathBuf,
     pub search: String,
     pub pool_tab: usize,
+    pub pool_filter: u8, // 0 all · 1 video · 2 audio · 3 image
     pub pending_seek: Option<f64>,
 }
 
 // ------------------------------------------------------------------ init
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, lang: Lang, demo: bool, selftest: Option<crate::selftest::SelfTest>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, demo: bool, selftest: Option<crate::selftest::SelfTest>) -> Self {
         crate::fonts::install(&cc.egui_ctx);
         let (tx, rx) = channel();
         let project = Project::default();
@@ -173,7 +176,7 @@ impl App {
         let _ = std::fs::create_dir_all(project_dir.join("proxies"));
         let is_test = selftest.is_some();
         let mut app = Self {
-            lang, theme: Theme::default(), project,
+            theme: Theme::default(), project,
             hist: History::new(Project::default()),
             assets: Vec::new(),
             project_dir,
@@ -182,11 +185,13 @@ impl App {
             ev_tx: tx, ev_rx: rx,
             player: Player::new(),
             tool: Tool::Select,
+            snap: true,
             sel: None,
             zoom: 110.0,
             scroll_t: 0.0,
             drag: None,
             workspace: Workspace::Edit,
+            scopes_visible: true,
             thumbs: HashMap::new(), big_imgs: HashMap::new(), waves: HashMap::new(),
             tex_cache: HashMap::new(), title_tex: HashMap::new(),
             probe_meta: HashMap::new(), scopes: ScopeImages::default(),
@@ -203,6 +208,7 @@ impl App {
             settings_path: dirs_home().unwrap_or_else(|| PathBuf::from(".")).join(".config/kestrelcut.json"),
             search: String::new(),
             pool_tab: 0,
+            pool_filter: 0,
             pending_seek: None,
         };
         app.player.quality = Some(Quality::Half);
@@ -217,9 +223,57 @@ impl App {
 
     // ------------------------------------------------------------ helpers
     #[inline]
-    pub fn t(&self, k: K) -> String { tx(self.lang, k) }
+    pub fn t(&self, k: K) -> String { crate::i18n::tr(k).to_string() }
 
     pub fn commit(&mut self) { self.hist.commit(self.project.clone()); }
+
+    pub fn do_undo(&mut self) {
+        if self.hist.undo() { self.project = self.hist.current().clone(); self.invalidate_preview(); }
+    }
+
+    pub fn do_redo(&mut self) {
+        if self.hist.redo() { self.project = self.hist.current().clone(); self.invalidate_preview(); }
+    }
+
+    pub fn new_project(&mut self) {
+        self.project = crate::model::Project::default();
+        self.hist = crate::model::History::new(self.project.clone());
+        self.assets.clear();
+        self.sel = None;
+        self.player.pause();
+        self.player.seek(0.0);
+        self.player.slots.clear();
+        self.invalidate_preview();
+        self.toast(self.t(K::NewProject), 1);
+    }
+
+    pub fn add_video_track(&mut self) {
+        self.commit();
+        let n = self.project.video_tracks().len() + 1;
+        self.project.tracks.push(crate::model::Track {
+            id: crate::model::next_id(),
+            kind: crate::model::TrackKind::Video,
+            name: format!("V{n}"),
+            locked: false, hidden: false, mute: false, solo: false, arm: false,
+            clips: Vec::new(),
+        });
+        self.commit();
+        self.toast(format!("✓ V{n}"), 1);
+    }
+
+    pub fn add_audio_track(&mut self) {
+        self.commit();
+        let n = self.project.audio_tracks().len() + 1;
+        self.project.tracks.push(crate::model::Track {
+            id: crate::model::next_id(),
+            kind: crate::model::TrackKind::Audio,
+            name: format!("A{n}"),
+            locked: false, hidden: false, mute: false, solo: false, arm: false,
+            clips: Vec::new(),
+        });
+        self.commit();
+        self.toast(format!("✓ A{n}"), 1);
+    }
 
     pub fn toast(&mut self, msg: impl Into<String>, kind: u8) {
         self.toasts.push(Toast { msg: msg.into(), kind, at: Instant::now() });
@@ -764,7 +818,9 @@ impl App {
         for (name, src) in clips {
             let p = dir.join(&name);
             if !p.exists() {
-                let _ = std::process::Command::new("ffmpeg").args([
+                let ffmpeg = media::ffmpeg().ok_or_else(|| "ffmpeg not found".to_string());
+                let Ok(bin) = ffmpeg else { continue };
+                let _ = std::process::Command::new(bin).args([
                     "-v", "quiet", "-y", "-f", "lavfi", "-i", src,
                     "-f", "lavfi", "-i", "sine=frequency=440:duration=8",
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",

@@ -6,7 +6,7 @@ use crate::app::{App, Drag};
 use crate::i18n::K;
 use crate::model::{Clip, ClipKind, TrackKind, MIN_CLIP_DUR};
 use crate::player::Tool;
-use crate::ui_common::{icon_toggle, tab_btn};
+use crate::ui_common::icon_toggle;
 use crate::ui_icons as ico;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
 
@@ -19,12 +19,29 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // header row
     ui.horizontal(|ui| {
         ui.add_space(8.0);
-        if tab_btn(app, ui, &format!("{} ✕", app.project.seq_name), true).clicked() {}
+        let (tr_r, _) = ui.allocate_exact_size(egui::vec2(150.0, 22.0), egui::Sense::hover());
+        ui.painter().rect_filled(tr_r, 3.0, app.theme.panel2);
+        ui.painter().text(Pos2::new(tr_r.left() + 10.0, tr_r.center().y), Align2::LEFT_CENTER,
+            &app.project.seq_name, FontId::proportional(12.0), app.theme.accent_text);
         let tc = crate::util::timecode(app.player.clock, app.project.fps);
         ui.add_space(6.0);
         ui.label(egui::RichText::new(tc).size(14.0).strong().color(app.theme.accent_text).monospace());
+        // magnetic snap toggle (real: gates all timeline snapping)
+        let snap_r = Rect::from_center_size(Pos2::new(ui.cursor().left() + 12.0, ui.cursor().center().y), Vec2::splat(22.0));
+        let snap_resp = ui.allocate_rect(snap_r, egui::Sense::click());
+        let snap_col = if app.snap { app.theme.accent } else { app.theme.dim };
+        if app.snap { ui.painter().rect_filled(snap_r, 4.0, app.theme.accent_dim.gamma_multiply(0.5)); }
+        ico::magnet(ui.painter(), snap_r.shrink(3.0), snap_col);
+        if snap_resp.clicked() { app.snap = !app.snap; }
+        if snap_resp.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(10.0);
+            // zoom slider (like the reference NLEs' timeline zoom control)
+            let mut zf = app.zoom;
+            let slider_w = (ui.available_width() - 90.0).clamp(80.0, 240.0);
+            let sl = egui::Slider::new(&mut zf, 4.0..=4000.0).logarithmic(true)
+                .show_value(false).text("");
+            if ui.add_sized([slider_w, 16.0], sl).changed() { app.zoom = zf; }
             ui.label(egui::RichText::new(format!("{:.0} px/s", app.zoom)).size(10.0).color(app.theme.faint));
         });
     });
@@ -370,9 +387,8 @@ fn paint_clip(app: &App, p: egui::Painter, r: &Rect, c: &Clip, kind: TrackKind, 
         }
         ClipKind::Title => {
             let txt = c.title.as_ref().map(|t| t.text.clone()).unwrap_or_default();
-            let shaped = crate::arabic::shape_if_arabic(&txt);
             p.text(Pos2::new(r.center().x, r.center().y), Align2::CENTER_CENTER,
-                &shaped, FontId::proportional(11.0), Color32::from_white_alpha(240));
+                &txt, FontId::proportional(11.0), Color32::from_white_alpha(240));
             p.text(Pos2::new(r.left() + 5.0, r.top() + 6.5), Align2::LEFT_CENTER,
                 &c.name, FontId::proportional(9.0), Color32::from_white_alpha(210));
         }
@@ -501,9 +517,9 @@ fn drag_update(app: &mut App, pt: Pos2, canvas: Rect) {
             let Some((old_tr, c)) = app.project.clip(id) else { return };
             let (old_tr_id, dur) = (old_tr.id, c.src_dur);
             let mut new_start = (t - grab_off).max(0.0);
-            // magnetic snapping
-            let snap_thresh = 8.0 / app.zoom;
-            if !ui_alt_down() {
+            // magnetic snapping (can be toggled off with the magnet button)
+            if app.snap && !ui_alt_down() {
+                let snap_thresh = 8.0 / app.zoom;
                 if let Some(snapped) = crate::util::snap_to(new_start, &app.project.snap_candidates(id, app.player.clock), snap_thresh) {
                     new_start = snapped;
                 } else if let Some(snapped) = crate::util::snap_to(new_start + dur, &app.project.snap_candidates(id, app.player.clock), snap_thresh) {

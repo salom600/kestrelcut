@@ -1,79 +1,77 @@
 # KestrelCut 🪶
 
-**Feather-light, crash-proof, cross-platform video editing.**
-مونتير فيديو احترافي فائق الخفة ومستقر — لـ Windows و Linux.
+**Feather-light, crash-proof, cross-platform video editing — with FFmpeg bundled.**
 
-![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue) ![lang](https://img.shields.io/badge/UI-Arabic%20%7C%20English-green)
+![platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue) ![ffmpeg](https://img.shields.io/badge/FFmpeg-bundled%20%E2%80%94%20works%20offline-success)
 
-KestrelCut is a professional non-linear video editor built around one idea:
-**the media engine can never take the editor down.** Decoding and encoding run
-in isolated FFmpeg processes; the GPU-accelerated UI stays responsive on
-low-spec machines and scales up to 8K proxy workflows on workstations.
+KestrelCut is a professional non-linear video editor built around two ideas:
+
+1. **The media engine can never take the editor down.** Decoding and encoding
+   run in isolated FFmpeg processes; the GPU-accelerated UI stays responsive
+   on low-spec machines and scales up to 8K proxy workflows on workstations.
+2. **It must work the moment you install it.** Every release artifact ships
+   with its own FFmpeg + ffprobe binaries. No system dependency, no downloads,
+   no "FFmpeg not found" — ever.
 
 ## Highlights
 
+- **FFmpeg bundled, works 100% offline** — the portable `.zip`, the `.msi`
+  installer, the `.AppImage` and the `.deb` all carry real FFmpeg binaries.
+  The app resolves them next to its own executable first (verified in CI by
+  running the packaged app with an empty `PATH`).
 - **Stability by architecture** — process-isolated media engine, bounded
-  memory pipelines (a frame ring of 4), no decoder crash can kill the editor.
-- **Familiar professional layout** — media pool, dual monitors, magnetic
-  multi-track timeline (V1–V3 / A1–A3), primary color panel + live scopes
-  (waveform / vectorscope / RGB parade), inspired by Resolve & Premiere.
-- **Real tools** — select, razor, slip, pen (audio keyframes), magnetic snap,
-  trim/slide, transforms (position / scale / rotate / opacity), LUTs (.cube),
-  blur, fades, volume envelopes.
+  memory pipelines, no decoder crash can kill the editor.
+- **Five real workspaces** (like Premiere/Resolve — every tab switches the
+  actual panel layout): **Edit · Color · Audio · Effects · Deliver**.
+- **Familiar professional layout** — media pool (thumbnail grid *and*
+  Name/Duration/FPS/Codec list), program monitor with full transport,
+  magnetic multi-track timeline (V1–V3 / A1–A3, lock / hide / mute / solo),
+  live scopes (luma waveform / vectorscope / RGB parade).
+- **Real color grading** — interactive **Lift / Gamma / Gain color wheels**
+  (drag to tint a tonal band, right-click to reset), Offset, Temperature,
+  Tint, Exposure, Contrast, Saturation, Vibrance, Highlights/Whites/Blacks,
+  LUT (.cube) loader, one-click looks — all rendered through real FFmpeg
+  filters in both preview *and* export (WYSIWYG).
+- **Real tools** — select, razor, slip, pen (audio keyframes), magnetic snap
+  toggle, trim/slide, transforms (position / scale / rotate / opacity),
+  speed, blur, fades, volume envelopes, titles.
 - **Hardware-accelerated export** — auto-detects NVENC / Intel QSV / AMD AMF;
   H.264, H.265/HEVC and AV1 (SVT-AV1) with live progress; the UI never blocks.
 - **Proxy workflow for low-spec PCs** — one click generates 540p proxies;
   decoding transparently switches to them.
-- **Bilingual RTL UI** — Arabic interface with real Unicode contextual
-  shaping (presentation forms) + simplified bidi, and one-click English.
+
+## Download
+
+Grab the latest artifact for your platform from
+[Releases](https://github.com/salom600/kestrelcut/releases) or from any CI
+run's artifact page:
+
+| Platform | Artifact | FFmpeg |
+|----------|----------|--------|
+| Windows  | `KestrelCut_<ver>_win64_portable.zip` | `ffmpeg.exe` + `ffprobe.exe` next to the app |
+| Windows  | `KestrelCut_<ver>_x64.msi`            | installed into the app folder |
+| Linux    | `kestrelcut_<ver>_amd64.AppImage`     | inside the image (`/usr/bin/ffmpeg`) |
+| Linux    | `kestrelcut_<ver>_amd64.deb`          | `/usr/lib/kestrelcut/bin/ffmpeg` |
+
+Advanced: set `KESTRELCUT_FFMPEG` to point at your own FFmpeg build.
 
 ## Build
 
 ```bash
 cargo build --release
-# run (Arabic UI)
-./target/release/kestrelcut
-# English UI with a populated demo timeline
-./target/release/kestrelcut --lang en --demo
-# scripted end-to-end functional test (imports, splits, grades, exports, verifies)
+./target/release/kestrelcut --demo              # populated demo timeline
+./target/release/kestrelcut --ws color          # start in the Color workspace
+./target/release/kestrelcut --where             # print resolved FFmpeg paths
+# scripted end-to-end functional test (imports, splits, wheels, exports, verifies)
 KC_SELFTEST_REPORT=report.json ./target/release/kestrelcut --selftest
 ```
 
-Runtime dependency: **FFmpeg** (on PATH). On Windows/portable builds,
-[ffmpeg-sidecar](https://crates.io/crates/ffmpeg-sidecar) downloads it
-automatically on first launch.
+## Keyboard shortcuts
 
-## CI artifacts
-
-Every push builds via GitHub Actions:
-
-| OS | Artifacts |
-|----|-----------|
-| Linux | `kestrelcut_<ver>_amd64.AppImage`, `kestrelcut_<ver>_amd64.deb` |
-| Windows | `KestrelCut_<ver>_x64.msi`, `KestrelCut_<ver>_win64_portable.zip` |
-
-Tagged pushes (`v*`) additionally attach everything to a GitHub Release.
-
-## Keyboard
-
-| Key | Action | | Key | Action |
-|-----|--------|-|-----|--------|
-| `Space` | Play / Pause | | `I` / `O` | Mark In / Out |
-| `S` | Split at playhead | | `←` / `→` | Frame step |
-| `A` / `C` / `P` | Select / Razor / Slip | | `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
-| `G` / `H` / `Z` / `T` | Pen / Hand / Zoom / Text | | `Ctrl+Wheel` | Timeline zoom |
-
-## Language / toolkit rationale (2026)
-
-- **Rust** — compile-time memory safety and race freedom (the editor core is
-  panic-isolated per job), fearless message-passing concurrency, first-class
-  GPU via wgpu/glow, single static binaries for painless cross-distribution.
-- **egui/eframe (GPU, OpenGL)** — immediate-mode rendering keeps complex
-  custom timeline painting simple and fast; zero system UI dependencies keeps
-  the AppImage/deb/msi tiny.
-- **FFmpeg 7.x as an isolated engine** — industry-grade codec coverage
-  (incl. hwaccel NVDEC/QCV/VCN decode + NVENC/QSV/AMF encode) with strict
-  crash isolation.
+`Space` play/pause · `S` split · `A` select · `C` razor · `P` slip ·
+`G` pen · `H` hand · `Z` zoom · `T` text · `I`/`O` mark in/out ·
+`Del` delete · `Ctrl+Z`/`Ctrl+Y` undo/redo · `Ctrl+wheel` zoom timeline ·
+`←`/`→` step frame (`Shift` = 1 s)
 
 ## License
 

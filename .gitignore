@@ -5,3 +5,4 @@
 *.msi
 selftest_report.json
 .kotlin/
+smoke_test/

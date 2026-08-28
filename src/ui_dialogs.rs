@@ -20,7 +20,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 
 // ---------------------------------------------------------------- browser
 fn file_browser(app: &mut App, ctx: &egui::Context, st: FsState) {
-    let title = st.mode.title(app.lang);
+    let title = st.mode.title();
     let mut open = true;
     egui::Window::new(RichText::new(title).size(14.0))
         .open(&mut open)
@@ -375,12 +375,14 @@ fn learn(app: &mut App, ctx: &egui::Context) {
             ui.label(RichText::new(app.t(K::Shortcuts)).size(12.5).strong());
             ui.label(RichText::new(app.t(K::ShotcutsBody)).size(11.5).color(app.theme.dim));
             ui.add_space(6.0);
+            ui.separator();
             ui.horizontal(|ui| {
-                ui.label(RichText::new(app.t(K::Language)).size(12.0).color(app.theme.dim));
-                if ui.button(RichText::new(app.lang.label()).size(12.0)).clicked() {
-                    app.lang = app.lang.toggle();
-                }
+                ui.label(RichText::new(app.t(K::MediaEngine)).size(11.5).color(app.theme.dim));
+                ui.label(RichText::new(crate::media::ffmpeg_source()).size(11.5).color(app.theme.ok));
             });
+            if let Ok(p) = std::env::current_exe() {
+                ui.label(RichText::new(p.display().to_string()).size(10.0).color(app.theme.faint).monospace());
+            }
         });
     if !open { app.dialog = None; }
 }

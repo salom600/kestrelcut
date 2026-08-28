@@ -1,14 +1,8 @@
-//! egui theme + fonts (Noto Naskh Arabic for Arabic rendering).
+//! egui theme + fonts.
 
 pub fn install(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    let arabic = include_bytes!("../assets/fonts/NotoNaskhArabic-Regular.ttf").to_vec();
-    fonts.font_data.insert("naskh".into(), std::sync::Arc::new(egui::FontData::from_owned(arabic)));
-    for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        if let Some(list) = fonts.families.get_mut(&fam) {
-            list.push("naskh".into());
-        }
-    }
+    // (Latin fonts only — UI is English.)
     ctx.set_fonts(fonts);
 
     let mut style = egui::Style::default();

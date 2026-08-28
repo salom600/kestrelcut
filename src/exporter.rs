@@ -1,7 +1,7 @@
 //! Export pipeline: builds one deterministic ffmpeg command from the timeline
 //! (multi-track overlay graph, per-clip grade/FX/transform, audio mixdown),
 //! hardware-accelerated encoders with quality mapping, live progress, and a
-//! title rasterizer (ab_glyph + Arabic presentation forms).
+//! title rasterizer (ab_glyph).
 
 use crate::media::{self, MediaEvent};
 use crate::model::{Clip, ClipKind, MediaAsset, Project, TrackKind};
@@ -112,7 +112,7 @@ const FONT: &[u8] = include_bytes!("../assets/fonts/NotoNaskhArabic-Regular.ttf"
 pub fn render_text_png(text: &str, size_px: f32, color: [u8; 3], w: u32, h: u32) -> Result<Vec<u8>, String> {
     use ab_glyph::{Font as _, FontRef, PxScale, ScaleFont};
     let font = FontRef::try_from_slice(FONT).map_err(|e| e.to_string())?;
-    let visual = crate::arabic::shape_if_arabic(text);
+    let visual = text.to_string();
     let scale = PxScale { x: size_px, y: size_px };
     let sf = font.as_scaled(scale);
 
@@ -419,7 +419,11 @@ fn export_blocking(spec: &ExportSpec, project: &Project, assets: &[MediaAsset], 
     if status.success() {
         Ok(spec.out.to_string_lossy().to_string())
     } else {
-        Err(format!("ffmpeg failed: {}", stderr.lines().last().unwrap_or("unknown error")))
+        // last few stderr lines — ffmpeg prints the culprit option first
+        let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
+        let mut tail: Vec<&str> = tail.into_iter().rev().collect();
+        tail.dedup();
+        Err(format!("ffmpeg failed: {}", tail.join(" | ")))
     }
 }
 

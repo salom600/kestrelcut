@@ -41,15 +41,58 @@ fn which(name: &str) -> Option<PathBuf> {
 
 static FFMPEG: OnceLock<Option<PathBuf>> = OnceLock::new();
 static FFPROBE: OnceLock<Option<PathBuf>> = OnceLock::new();
+static FFMPEG_SRC: OnceLock<&'static str> = OnceLock::new();
 
-/// Resolve ffmpeg binary: system PATH first, then ffmpeg-sidecar download
-/// (used on Windows / portable builds where ffmpeg is not preinstalled).
+/// Candidate directories that carry BUNDLED ffmpeg binaries shipped with the
+/// app (portable zip, AppImage mount, MSI/deb install layouts).
+fn bundled_dirs() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            v.push(dir.to_path_buf());          // ffmpeg next to the binary
+            v.push(dir.join("bin"));            // ffmpeg/bin layout
+            v.push(dir.join("ffmpeg"));         // ffmpeg/ffmpeg.exe layout
+        }
+    }
+    // Linux distro packages must not collide with system ffmpeg in /usr/bin
+    v.push(PathBuf::from("/usr/lib/kestrelcut/bin"));
+    v.push(PathBuf::from("/usr/local/lib/kestrelcut/bin"));
+    v
+}
+
+fn find_bundled(name: &str) -> Option<PathBuf> {
+    for dir in bundled_dirs() {
+        let mut cands = vec![dir.join(name)];
+        if cfg!(windows) {
+            cands.push(dir.join(format!("{name}.exe")));
+        }
+        for c in cands {
+            if c.is_file() { return Some(c); }
+        }
+    }
+    None
+}
+
+/// Resolve ffmpeg binary. Order (offline-first — the app NEVER downloads):
+///   1. KESTRELCUT_FFMPEG env override
+///   2. Bundled copy shipped with the app (portable/AppImage/deb/MSI)
+///   3. System PATH
 pub fn ffmpeg() -> Option<PathBuf> {
     FFMPEG.get_or_init(|| {
-        if let Some(p) = which("ffmpeg") { return Some(p); }
-        if ffmpeg_sidecar::download::auto_download().is_ok() {
-            let p = PathBuf::from(ffmpeg_sidecar::paths::ffmpeg_path());
-            if p.exists() { return Some(p); }
+        if let Ok(p) = std::env::var("KESTRELCUT_FFMPEG") {
+            let p = PathBuf::from(p);
+            if p.is_file() {
+                let _ = FFMPEG_SRC.set("env override");
+                return Some(p);
+            }
+        }
+        if let Some(p) = find_bundled("ffmpeg") {
+            let _ = FFMPEG_SRC.set("bundled with KestrelCut");
+            return Some(p);
+        }
+        if let Some(p) = which("ffmpeg") {
+            let _ = FFMPEG_SRC.set("system PATH");
+            return Some(p);
         }
         None
     }).clone()
@@ -57,8 +100,13 @@ pub fn ffmpeg() -> Option<PathBuf> {
 
 pub fn ffprobe() -> Option<PathBuf> {
     FFPROBE.get_or_init(|| {
+        if let Ok(p) = std::env::var("KESTRELCUT_FFPROBE") {
+            let p = PathBuf::from(p);
+            if p.is_file() { return Some(p); }
+        }
+        if let Some(p) = find_bundled("ffprobe") { return Some(p); }
         if let Some(p) = which("ffprobe") { return Some(p); }
-        // sidecar package ships ffprobe next to ffmpeg
+        // static builds ship ffprobe next to ffmpeg
         ffmpeg().as_ref().map(|f| f.with_file_name("ffprobe")
             .with_extension(if cfg!(windows) { "exe" } else { "" }))
             .filter(|p| p.exists())
@@ -66,6 +114,23 @@ pub fn ffprobe() -> Option<PathBuf> {
 }
 
 pub fn ffmpeg_ok() -> bool { ffmpeg().is_some() }
+
+/// Where the resolved binaries came from (for About / diagnostics).
+pub fn ffmpeg_source() -> &'static str {
+    FFMPEG_SRC.get().copied().unwrap_or("not found")
+}
+
+/// Diagnostic printout used by `kestrelcut --where`.
+pub fn where_report() -> String {
+    let f = ffmpeg();
+    let p = ffprobe();
+    format!(
+        "ffmpeg : {}\nffprobe: {}\nsource : {}",
+        f.as_ref().map(|x| x.display().to_string()).unwrap_or_else(|| "NOT FOUND".into()),
+        p.as_ref().map(|x| x.display().to_string()).unwrap_or_else(|| "NOT FOUND".into()),
+        ffmpeg_source(),
+    )
+}
 
 // ------------------------------------------------------------------ probe
 #[derive(Clone, Debug, Default)]
@@ -189,19 +254,40 @@ pub fn grade_filters(g: &Grade) -> Vec<String> {
         let t = (6500.0 + g.temp as f64 * 40.0).clamp(2000.0, 11000.0) as i32;
         v.push(format!("colortemperature=temperature={t}"));
     }
+    // ---- colorbalance: tint + Lift/Gamma/Gain wheels (single filter) ----
+    // colorbalance ranges are -1..1 per channel per tonal band.
+    let mut cb: Vec<String> = Vec::new();
     if g.tint.abs() > 0.5 {
         let m = ((g.tint.abs() / 100.0) * 0.5).min(0.5);
         if g.tint > 0.0 {
-            v.push(format!("colorbalance=rm={m:.3}:gm={:.3}", m * 0.3));
+            cb.push(format!("rm={m:.3}")); cb.push(format!("gm={:.3}", m * 0.3));
         } else {
-            v.push(format!("colorbalance=bm={m:.3}"));
+            cb.push(format!("bm={m:.3}"));
         }
     }
+    for (band, wheel) in [("s", &g.lift), ("m", &g.gamma), ("h", &g.gain)] {
+        for (ch, val) in wheel.iter().enumerate() {
+            if val.abs() > 0.005 {
+                // colorbalance keys are channel-first: rs/gs/bs, rm/gm/bm, rh/gh/bh
+                let key = format!("{}{}", ["r", "g", "b"][ch], band);
+                cb.push(format!("{key}={:.3}", val.clamp(-1.0, 1.0)));
+            }
+        }
+    }
+    if !cb.is_empty() { v.push(format!("colorbalance={}", cb.join(":"))); }
+
     let mut eq = Vec::new();
     if g.exposure.abs() > 0.01 { eq.push(format!("brightness={:.3}", (g.exposure / 10.0).clamp(-1.0, 1.0))); }
+    // Offset master wheel drives overall brightness on top of exposure.
+    if g.offset.abs() > 0.5 { eq.push(format!("brightness={:.3}", (g.offset / 100.0).clamp(-1.0, 1.0))); }
     if g.contrast.abs() > 0.5 { eq.push(format!("contrast={:.3}", 1.0 + g.contrast as f64 / 100.0)); }
     if g.saturation.abs() > 0.5 { eq.push(format!("saturation={:.3}", (1.0 + g.saturation as f64 / 100.0).max(0.0))); }
     if !eq.is_empty() { v.push(format!("eq={}", eq.join(":"))); }
+    // Vibrance: saturates low-sat colors first (real ffmpeg vibrance filter).
+    if g.vibrance.abs() > 0.5 {
+        let i = (g.vibrance as f64 / 100.0).clamp(-1.0, 1.0);
+        v.push(format!("vibrance=intensity={i:.3}"));
+    }
     if g.blacks.abs() > 0.5 {
         let b = (g.blacks as f64 / 100.0 * 0.05).abs();
         let p = if g.blacks > 0.0 { format!("0/{:.3}", b) } else { format!("0/-{:.3}", b) };

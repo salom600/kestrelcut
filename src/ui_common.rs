@@ -91,7 +91,7 @@ pub fn gradient_slider(
     ui.horizontal(|ui| {
         let (lr, _) = ui.allocate_exact_size(Vec2::new(92.0, 18.0), Sense::hover());
         ui.painter().text(Pos2::new(lr.left(), lr.center().y), Align2::LEFT_CENTER, label, FontId::proportional(12.0), th.dim);
-        let avail = (ui.available_width() - 54.0).max(60.0);
+        let avail = (ui.available_width() - 66.0).max(60.0);
         let (r, resp) = ui.allocate_exact_size(Vec2::new(avail, 14.0), Sense::click_and_drag());
         let track = Rect::from_min_max(Pos2::new(r.left(), r.center().y - 2.0), Pos2::new(r.right(), r.center().y + 2.0));
         ui.painter().rect_filled(track, 2.0, th.panel3);

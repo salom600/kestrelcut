@@ -15,7 +15,7 @@ env:
 
 jobs:
   build-linux:
-    name: Linux (AppImage + .deb)
+    name: Linux (AppImage + .deb, FFmpeg bundled)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -29,8 +29,19 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libasound2-dev file
+          sudo apt-get install -y ffmpeg libasound2-dev file jq xz-utils
           ffmpeg -version | head -1
+
+      - name: Download static FFmpeg (bundled into artifacts)
+        run: |
+          mkdir -p dist/ffmpeg-bin
+          curl -fL --retry 3 -o ffmpeg-static.tar.xz \
+            https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar xf ffmpeg-static.tar.xz
+          FDIR=$(find . -maxdepth 1 -type d -name 'ffmpeg-*static' | head -1)
+          install -m 755 "$FDIR/ffmpeg"  dist/ffmpeg-bin/ffmpeg
+          install -m 755 "$FDIR/ffprobe" dist/ffmpeg-bin/ffprobe
+          dist/ffmpeg-bin/ffmpeg -version | head -1
 
       - name: Build (release)
         run: cargo build --release --locked || cargo build --release
@@ -38,36 +49,60 @@ jobs:
       - name: Unit tests
         run: cargo test --release --lib
 
+      - name: Smoke test — offline FFmpeg resolution (bundled-first)
+        run: |
+          rm -rf smoke && mkdir smoke
+          cp target/release/kestrelcut dist/ffmpeg-bin/ffmpeg dist/ffmpeg-bin/ffprobe smoke/
+          OUT=$(env -i HOME="$HOME" PATH=/nonexistent ./smoke/kestrelcut --where)
+          echo "$OUT"
+          echo "$OUT" | grep -q "bundled with KestrelCut"
+          echo "$OUT" | grep -q "ffprobe: .*ffprobe"
+
       - name: Generate app icon
         run: |
           ./target/release/kestrelcut --gen-icon dist/icon.png 256
           ./target/release/kestrelcut --gen-icon dist/icon.ico 256
 
-      - name: Package .deb
+      - name: Package .deb (FFmpeg in /usr/lib/kestrelcut/bin)
         run: |
-          mkdir -p dist
           V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           ROOT=packaging/deb/kestrelcut
-          mkdir -p $ROOT/usr/bin $ROOT/usr/share/applications $ROOT/usr/share/icons/hicolor/256x256/apps
+          rm -rf $ROOT
+          mkdir -p $ROOT/usr/bin $ROOT/usr/lib/kestrelcut/bin \
+                   $ROOT/usr/share/applications $ROOT/usr/share/icons/hicolor/256x256/apps
           install -m 755 target/release/kestrelcut $ROOT/usr/bin/kestrelcut
+          install -m 755 dist/ffmpeg-bin/ffmpeg  $ROOT/usr/lib/kestrelcut/bin/ffmpeg
+          install -m 755 dist/ffmpeg-bin/ffprobe $ROOT/usr/lib/kestrelcut/bin/ffprobe
           cp packaging/kestrelcut.desktop $ROOT/usr/share/applications/kestrelcut.desktop
           cp dist/icon.png $ROOT/usr/share/icons/hicolor/256x256/apps/kestrelcut.png
           sed -i "s/^Version: .*/Version: $V/" $ROOT/DEBIAN/control
           dpkg-deb --build --root-owner-group $ROOT dist/kestrelcut_${V}_amd64.deb
 
-      - name: Build AppImage
+      - name: Build AppImage (FFmpeg inside)
         run: |
           V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           curl -fL -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           chmod +x linuxdeploy
+          rm -rf AppDir
           mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
           install -m 755 target/release/kestrelcut AppDir/usr/bin/kestrelcut
+          install -m 755 dist/ffmpeg-bin/ffmpeg  AppDir/usr/bin/ffmpeg
+          install -m 755 dist/ffmpeg-bin/ffprobe AppDir/usr/bin/ffprobe
           cp packaging/kestrelcut.desktop AppDir/usr/share/applications/kestrelcut.desktop
           cp dist/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/kestrelcut.png
           ./linuxdeploy --appimage-extract-and-run --appdir AppDir --output appimage
           mv KestrelCut-*.AppImage dist/kestrelcut_${V}_amd64.AppImage
           mv dist/icon.png dist/kestrelcut_icon.png
           mv dist/icon.ico dist/kestrelcut.ico
+
+      - name: Verify AppImage carries FFmpeg
+        run: |
+          V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          chmod +x dist/kestrelcut_${V}_amd64.AppImage
+          ./dist/kestrelcut_${V}_amd64.AppImage --appimage-extract ffmpeg >/dev/null 2>&1 || true
+          test -f squashfs-root/usr/bin/ffmpeg
+          rm -rf squashfs-root
+          du -h dist/kestrelcut_${V}_amd64.AppImage dist/kestrelcut_${V}_amd64.deb
 
       - name: Upload artifacts (every push)
         uses: actions/upload-artifact@v4
@@ -87,7 +122,7 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" dist/*.AppImage dist/*.deb --clobber
 
   build-windows:
-    name: Windows (.exe + .msi)
+    name: Windows (.exe portable + .msi, FFmpeg bundled)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,11 +133,34 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Download FFmpeg (bundled into artifacts)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/ffmpeg-bin | Out-Null
+          curl.exe -fL --retry 3 -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp -Force
+          $fdir = (Get-ChildItem ffmpeg_tmp -Directory | Select-Object -First 1).FullName
+          Copy-Item "$fdir/bin/ffmpeg.exe"  dist/ffmpeg-bin/ffmpeg.exe
+          Copy-Item "$fdir/bin/ffprobe.exe" dist/ffmpeg-bin/ffprobe.exe
+          & dist/ffmpeg-bin/ffmpeg.exe -version | Select-Object -First 1
+
       - name: Build (release)
         run: cargo build --release --locked || cargo build --release
 
       - name: Unit tests
         run: cargo test --release --lib
+
+      - name: Smoke test — offline FFmpeg resolution (bundled-first)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path smoke | Out-Null
+          Copy-Item target/release/kestrelcut.exe smoke/
+          Copy-Item dist/ffmpeg-bin/ffmpeg.exe  smoke/
+          Copy-Item dist/ffmpeg-bin/ffprobe.exe smoke/
+          $out = & "$PWD/smoke/kestrelcut.exe" --where
+          $out | Write-Host
+          $joined = $out -join "`n"
+          if ($joined -notmatch "bundled with KestrelCut") { throw "bundled ffmpeg not resolved" }
 
       - name: Generate app icon
         shell: bash
@@ -111,18 +169,31 @@ jobs:
           ./target/release/kestrelcut.exe --gen-icon dist/icon.png 256
           ./target/release/kestrelcut.exe --gen-icon dist/icon.ico 256
 
-      - name: Package portable .zip
+      - name: Package portable .zip (FFmpeg next to exe)
         shell: pwsh
         run: |
           $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
           New-Item -ItemType Directory -Force -Path dist/portable | Out-Null
           Copy-Item target/release/kestrelcut.exe dist/portable/KestrelCut.exe
+          Copy-Item dist/ffmpeg-bin/ffmpeg.exe  dist/portable/
+          Copy-Item dist/ffmpeg-bin/ffprobe.exe dist/portable/
           Copy-Item README.md dist/portable/ -ErrorAction SilentlyContinue
           Compress-Archive -Path dist/portable/* -DestinationPath "dist/KestrelCut_${v}_win64_portable.zip" -Force
           Copy-Item dist/icon.png dist/KestrelCut_icon.png -Force
           Copy-Item dist/icon.ico dist/KestrelCut.ico -Force
+          "zip size: " + [math]::Round((Get-Item "dist/KestrelCut_${v}_win64_portable.zip").Length/1MB,1) + " MB"
 
-      - name: Build .msi (WiX)
+      - name: Verify portable zip resolves bundled FFmpeg offline
+        shell: pwsh
+        run: |
+          $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          Expand-Archive "dist/KestrelCut_${v}_win64_portable.zip" -DestinationPath zip_check -Force
+          $out = & "$PWD/zip_check/KestrelCut.exe" --where
+          $out | Write-Host
+          $joined = $out -join "`n"
+          if ($joined -notmatch "bundled with KestrelCut") { throw "portable zip missing bundled ffmpeg" }
+
+      - name: Build .msi (WiX, FFmpeg included)
         shell: pwsh
         run: |
           $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
@@ -131,8 +202,12 @@ jobs:
           candle.exe packaging/kestrelcut.wxs `
             -dExePath="$PWD\target\release\kestrelcut.exe" `
             -dIcoPath="$PWD\dist\icon.ico" `
+            -dFfmpegPath="$PWD\dist\ffmpeg-bin\ffmpeg.exe" `
+            -dFfprobePath="$PWD\dist\ffmpeg-bin\ffprobe.exe" `
+            -dVer="$v" `
             -arch x64 -o dist/kestrelcut.wixobj
           light.exe dist/kestrelcut.wixobj -o "dist/KestrelCut_${v}_x64.msi" -ext WixUIExtension
+          "msi size: " + [math]::Round((Get-Item "dist/KestrelCut_${v}_x64.msi").Length/1MB,1) + " MB"
 
       - name: Upload artifacts (every push)
         uses: actions/upload-artifact@v4

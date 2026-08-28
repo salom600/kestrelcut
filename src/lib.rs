@@ -2,7 +2,6 @@
 
 pub mod app;
 pub mod app_ui;
-pub mod arabic;
 pub mod decoder;
 pub mod exporter;
 pub mod fonts;

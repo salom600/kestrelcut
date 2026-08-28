@@ -20,8 +20,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.painter().rect_filled(r, Rounding { nw: 4, ne: 4, sw: 0, se: 0 }, app.theme.panel2);
         ui.painter().text(Pos2::new(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER,
             &label, FontId::proportional(12.0), app.theme.accent_text);
-        let xrect = Rect::from_center_size(Pos2::new(r.right() - 12.0, r.center().y), Vec2::splat(14.0));
-        ico::x(ui.painter(), xrect, app.theme.faint);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(10.0);
             ui.label(egui::RichText::new(format!("{}×{} · {:.0}fps", app.project.width, app.project.height, app.project.fps))

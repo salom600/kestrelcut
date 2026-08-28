@@ -5,7 +5,6 @@
 //! ffprobe verification. Writes a JSON report and sets exit code.
 
 use crate::app::App;
-use crate::i18n::Lang;
 use std::time::{Duration, Instant};
 
 pub struct SelfTest {
@@ -88,10 +87,27 @@ impl SelfTest {
                     .and_then(|t| t.clips.iter().find(|c| 3.5 >= c.tl_start && 3.5 < c.end()).map(|c| c.id));
                 if let Some(id) = target {
                     app.sel = Some(id);
+                    // primary sliders + FX (same setters the panels call)
                     app.set_grade_of_selection(|g| { g.contrast = 20.0; g.saturation = -30.0; g.exposure = 0.3; });
                     app.set_fx_of_selection(|f| { f.blur = 2.0; f.fade_in = 0.5; });
                     app.commit();
-                    self.log(format!("grade+fx applied to clip {id}"));
+                    // color wheels (Lift/Gamma/Gain/Offset/Vibrance) — same setters the wheel UI calls
+                    app.set_grade_of_selection(|g| {
+                        g.lift = [0.10, -0.05, 0.0];   // teal-ish shadows
+                        g.gamma = [0.0, 0.08, 0.12];   // cool midtones
+                        g.gain = [0.15, 0.10, 0.0];    // warm highlights
+                        g.offset = 4.0;
+                        g.vibrance = 25.0;
+                    });
+                    if let Some(c) = app.project.clip_mut(id) {
+                        let w = crate::media::grade_filters(&c.grade);
+                        if !w.iter().any(|f| f.starts_with("colorbalance=")) || !w.iter().any(|f| f.starts_with("vibrance=")) {
+                            self.fail("color wheels did not map to ffmpeg filters");
+                        }
+                    }
+                    if self.finished { return; } // wheel filter-mapping check failed
+                    app.commit();
+                    self.log("grade+fx+wheels applied to clip".into());
                     self.next();
                 } else {
                     self.fail("no clip found at 3.5s on V1");
@@ -199,11 +215,12 @@ impl SelfTest {
         let report = serde_json::json!({
             "app": "KestrelCut",
             "version": env!("CARGO_PKG_VERSION"),
-            "lang": match app.lang { Lang::En => "en", _ => "ar" },
+            "lang": "en",
             "passed": self.passed,
             "elapsed_s": self.t0.elapsed().as_secs_f64(),
             "output": self.out_path.as_ref().map(|p| p.display().to_string()),
             "ffmpeg": crate::media::ffmpeg().map(|p| p.display().to_string()),
+            "ffmpeg_source": crate::media::ffmpeg_source(),
             "encoders_used": app.export_state.vcodec,
             "log": self.lines,
         });

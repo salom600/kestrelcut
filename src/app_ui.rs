@@ -95,34 +95,35 @@ impl App {
                     ico::play(&p, icon_r.shrink(4.0), Color32::WHITE);
                     ui.add_space(24.0);
 
-                    // menus
+                    // menus — every item performs a real action
                     egui::menu::bar(ui, |ui| {
                         let menus = [
-                            (K::File, 0u8), (K::EditMenu, 1), (K::ClipMenu, 2), (K::SeqMenu, 3), (K::HelpMenu, 4),
+                            (K::File, 0u8), (K::EditMenu, 1), (K::ClipMenu, 2),
+                            (K::TimelineMenu, 3), (K::ViewMenu, 4), (K::PlaybackMenu, 5), (K::HelpMenu, 6),
                         ];
                         for (k, idx) in menus {
                             ui.menu_button(self.t(k), |ui| {
                                 match idx {
-                                    0 => {
-                                        if ui.button(self.t(K::NewProject)).clicked() { self.project = crate::model::Project::default(); self.hist = crate::model::History::new(self.project.clone()); self.assets.clear(); ui.close_menu(); }
+                                    0 => { // File
+                                        if ui.button(self.t(K::NewProject)).clicked() { self.new_project(); ui.close_menu(); }
                                         if ui.button(self.t(K::OpenProject)).clicked() { self.dialog = Some(Dialog::Fs(FsState { dir: self.project_dir.clone(), mode: FsMode::OpenProject, name: String::new() })); ui.close_menu(); }
                                         if ui.button(self.t(K::Save)).clicked() { self.save_project(self.project_dir.join(format!("{}.kcproj", self.project.name))); ui.close_menu(); }
                                         if ui.button(self.t(K::SaveAs)).clicked() { self.dialog = Some(Dialog::Fs(FsState { dir: self.project_dir.clone(), mode: FsMode::SaveProject, name: format!("{}.kcproj", self.project.name) })); ui.close_menu(); }
                                         ui.separator();
                                         if ui.button(self.t(K::ImportMedia)).clicked() { self.dialog = Some(Dialog::Fs(FsState { dir: self.project_dir.clone(), mode: FsMode::OpenMedia, name: String::new() })); ui.close_menu(); }
-                                        if ui.button(self.t(K::ExportMenu)).clicked() { self.export_state.open = true; ui.close_menu(); }
+                                        if ui.button(self.t(K::ExportMenu)).clicked() { self.export_state.open = true; self.workspace = Workspace::Export; ui.close_menu(); }
                                         ui.separator();
                                         if ui.button(self.t(K::Exit)).clicked() { self.exit_requested = true; ui.close_menu(); }
                                     }
-                                    1 => {
-                                        if ui.add_enabled(self.hist.can_undo(), egui::Button::new(self.t(K::Undo))).clicked() { if self.hist.undo() { self.project = self.hist.current().clone(); self.invalidate_preview(); } ui.close_menu(); }
-                                        if ui.add_enabled(self.hist.can_redo(), egui::Button::new(self.t(K::Redo))).clicked() { if self.hist.redo() { self.project = self.hist.current().clone(); self.invalidate_preview(); } ui.close_menu(); }
+                                    1 => { // Edit
+                                        if ui.add_enabled(self.hist.can_undo(), egui::Button::new(self.t(K::Undo))).clicked() { self.do_undo(); ui.close_menu(); }
+                                        if ui.add_enabled(self.hist.can_redo(), egui::Button::new(self.t(K::Redo))).clicked() { self.do_redo(); ui.close_menu(); }
                                         ui.separator();
                                         if ui.button(self.t(K::SplitPlayhead)).clicked() { self.split_at_playhead(); ui.close_menu(); }
                                         if ui.button(self.t(K::RippleDelete)).clicked() { self.delete_selection(true); ui.close_menu(); }
                                         if ui.button(self.t(K::Delete)).clicked() { self.delete_selection(false); ui.close_menu(); }
                                     }
-                                    2 => {
+                                    2 => { // Clip
                                         if ui.button(self.t(K::AddTitleClip)).clicked() { self.add_title_at_playhead(); ui.close_menu(); }
                                         if ui.button(self.t(K::CreateProxy)).clicked() {
                                             if let Some(c) = self.selected_clip().and_then(|c| c.source.clone()) {
@@ -137,13 +138,37 @@ impl App {
                                             ui.close_menu();
                                         }
                                     }
-                                    3 => {
+                                    3 => { // Timeline
+                                        if ui.button(self.t(K::AddVideoTrack)).clicked() { self.add_video_track(); ui.close_menu(); }
+                                        if ui.button(self.t(K::AddAudioTrack)).clicked() { self.add_audio_track(); ui.close_menu(); }
+                                        ui.separator();
+                                        let snap_label = format!("{} ✓", self.t(K::Snap));
+                                        if ui.button(if self.snap { snap_label } else { self.t(K::Snap) }).clicked() { self.snap = !self.snap; ui.close_menu(); }
+                                        ui.separator();
+                                        if ui.button(self.t(K::ZoomIn)).clicked() { self.zoom = (self.zoom * 1.25).min(4000.0); ui.close_menu(); }
+                                        if ui.button(self.t(K::ZoomOut)).clicked() { self.zoom = (self.zoom / 1.25).max(4.0); ui.close_menu(); }
+                                    }
+                                    4 => { // View
+                                        for (ws, k) in [(Workspace::Edit, K::WsEdit), (Workspace::Color, K::WsColor), (Workspace::Audio, K::WsAudio), (Workspace::Fx, K::WsFx), (Workspace::Export, K::WsExport)] {
+                                            if ui.button(self.t(k)).clicked() { self.workspace = ws; ui.close_menu(); }
+                                        }
+                                        ui.separator();
+                                        let sc_label = if self.scopes_visible { format!("{} ✓", self.t(K::Scopes)) } else { self.t(K::Scopes) };
+                                        if ui.button(sc_label).clicked() { self.scopes_visible = !self.scopes_visible; ui.close_menu(); }
+                                    }
+                                    5 => { // Playback
+                                        if ui.button(if self.player.playing { self.t(K::Pause) } else { self.t(K::Play) }).clicked() { self.toggle_play(); ui.close_menu(); }
+                                        let loop_label = if self.player.loop_play { format!("{} ✓", self.t(K::Loop)) } else { self.t(K::Loop) };
+                                        if ui.button(loop_label).clicked() { self.player.loop_play = !self.player.loop_play; ui.close_menu(); }
+                                        ui.separator();
+                                        if ui.button(self.t(K::GoStart)).clicked() { self.player.seek(self.project.in_mark.unwrap_or(0.0)); self.player.slots.clear(); ui.close_menu(); }
+                                        if ui.button(self.t(K::GoEnd)).clicked() { self.player.seek(self.project.out_mark.unwrap_or(self.project.duration())); self.player.slots.clear(); ui.close_menu(); }
+                                        ui.separator();
                                         if ui.button(self.t(K::MarkIn)).clicked() { self.project.in_mark = Some(self.player.clock); ui.close_menu(); }
                                         if ui.button(self.t(K::MarkOut)).clicked() { self.project.out_mark = Some(self.player.clock); ui.close_menu(); }
-                                        if ui.button(self.t(K::Markers)).clicked() { self.project.add_marker(self.player.clock); self.commit(); ui.close_menu(); }
                                     }
-                                    _ => {
-                                        if ui.button(self.t(K::LearnTitle)).clicked() { self.dialog = Some(Dialog::Learn); ui.close_menu(); }
+                                    _ => { // Help
+                                        if ui.button(self.t(K::About2)).clicked() { self.dialog = Some(Dialog::Learn); ui.close_menu(); }
                                         if ui.button(self.t(K::Shortcuts)).clicked() { self.dialog = Some(Dialog::Learn); ui.close_menu(); }
                                     }
                                 }
@@ -161,10 +186,6 @@ impl App {
                         if icon_btn(self, ui, 24.0, "Minimize", ico::minimize).clicked() {
                             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
                         }
-                        // language toggle
-                        let lang_btn = egui::Button::new(egui::RichText::new(self.lang.label()).size(11.5))
-                            .fill(self.theme.panel3).rounding(4.0);
-                        if ui.add(lang_btn).clicked() { self.lang = self.lang.toggle(); }
                         ui.add_space(6.0);
                         // project title (center-ish)
                         ui.label(egui::RichText::new(&self.project.name).size(12.5).strong().color(self.theme.text));
@@ -201,22 +222,18 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(8.0);
+                    // every tab switches the real panel arrangement
                     let tabs = [
-                        (Workspace::Learn, K::WsLearn),
-                        (Workspace::Export, K::WsExport),
-                        (Workspace::Cut, K::WsCut),
+                        (Workspace::Edit, K::WsEdit),
                         (Workspace::Color, K::WsColor),
                         (Workspace::Audio, K::WsAudio),
                         (Workspace::Fx, K::WsFx),
-                        (Workspace::Media, K::WsMedia),
-                        (Workspace::Edit, K::WsEdit),
+                        (Workspace::Export, K::WsExport),
                     ];
                     for (ws, k) in tabs {
-                        let label = self.t(k);
-                        if tab_btn(self, ui, &label, self.workspace == ws).clicked() {
+                        if tab_btn(self, ui, &self.t(k), self.workspace == ws).clicked() {
                             self.workspace = ws;
-                            if ws == Workspace::Learn { self.dialog = Some(Dialog::Learn); }
-                            if ws == Workspace::Export { self.export_state.open = true; }
+                            if ws == Workspace::Export { self.export_state.open = false; } // page, not dialog
                         }
                     }
                 });
@@ -252,16 +269,29 @@ impl App {
             .frame(egui::Frame::none().fill(self.theme.panel).stroke(egui::Stroke::new(1.0, self.theme.border)))
             .resizable(false)
             .show(ctx, |ui| {
-                egui::TopBottomPanel::bottom("scopes_area").exact_height(ui.available_height() * 0.44)
-                    .frame(egui::Frame::none().fill(self.theme.panel))
-                    .show_inside(ui, |ui| {
-                        crate::ui_right::show_scopes(self, ui);
-                    });
+                // scopes occupy the bottom; proportion depends on workspace
+                let scopes_frac = match self.workspace {
+                    Workspace::Color => 0.42,
+                    Workspace::Fx => 0.30,
+                    _ => 0.44,
+                };
+                if self.scopes_visible {
+                    egui::TopBottomPanel::bottom("scopes_area").exact_height(ui.available_height() * scopes_frac)
+                        .frame(egui::Frame::none().fill(self.theme.panel))
+                        .show_inside(ui, |ui| {
+                            crate::ui_right::show_scopes(self, ui);
+                        });
+                }
                 egui::CentralPanel::default()
                     .frame(egui::Frame::none().fill(self.theme.panel))
                     .show_inside(ui, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
-                            crate::ui_right::show_color(self, ui);
+                            match self.workspace {
+                                Workspace::Color => crate::ui_right::show_color(self, ui),
+                                Workspace::Audio => crate::ui_right::show_audio(self, ui),
+                                Workspace::Fx => crate::ui_right::show_fx(self, ui),
+                                _ => crate::ui_right::show_inspector(self, ui),
+                            }
                         });
                     });
             });
@@ -302,8 +332,16 @@ impl App {
             draw_toast(self, &painter, msg_rect, &t.msg, t.kind, alpha);
             yoff += 38.0;
         }
-        // dialogs
-        crate::ui_dialogs::show(self, ctx);
+        // dialogs (skip export dialog while the Deliver page is open)
+        if self.workspace != Workspace::Export {
+            crate::ui_dialogs::show(self, ctx);
+        } else {
+            match &self.dialog {
+                None => {}
+                Some(Dialog::Proxies) | Some(Dialog::Learn) => crate::ui_dialogs::show(self, ctx),
+                Some(Dialog::Fs(_)) => crate::ui_dialogs::show(self, ctx),
+            }
+        }
         // ffmpeg missing banner
         if !crate::media::ffmpeg_ok() {
             let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("ffmpegwarn")));

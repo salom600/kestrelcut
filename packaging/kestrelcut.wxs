@@ -1,9 +1,9 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*" Name="KestrelCut" Language="1033" Version="0.1.0.0"
+  <Product Id="*" Name="KestrelCut" Language="1033" Version="$(var.Ver).0"
            Manufacturer="salom600" UpgradeCode="7C7A9B1E-52D4-4A8E-9F01-3B6C5D8E2A10">
     <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine"
-             Description="KestrelCut — feather-light video editor" Manufacturer="salom600"/>
+             Description="KestrelCut — feather-light video editor (FFmpeg bundled)" Manufacturer="salom600"/>
     <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed."/>
     <MediaTemplate EmbedCab="yes"/>
     <Property Id="ARPPRODUCTICON" Value="kc.ico"/>
@@ -23,6 +23,12 @@
         <File Id="KestrelCutExe" Source="$(var.ExePath)" KeyPath="yes" Name="kestrelcut.exe"/>
         <Shortcut Id="StartMenuKestrelCut" Name="KestrelCut" Directory="ProgramMenuFolder"
                   WorkingDirectory="INSTALLFOLDER" Advertise="yes"/>
+      </Component>
+      <Component Directory="INSTALLFOLDER" Id="FfmpegExe" Guid="*">
+        <File Id="FfmpegBin" Source="$(var.FfmpegPath)" Name="ffmpeg.exe" KeyPath="yes"/>
+      </Component>
+      <Component Directory="INSTALLFOLDER" Id="FfprobeExe" Guid="*">
+        <File Id="FfprobeBin" Source="$(var.FfprobePath)" Name="ffprobe.exe" KeyPath="yes"/>
       </Component>
     </ComponentGroup>
     <Icon Id="kc.ico" SourceFile="$(var.IcoPath)"/>

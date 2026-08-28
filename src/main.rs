@@ -1,27 +1,30 @@
 //! Entry point: arg parsing, window options, app icon.
 
 use kestrelcut::app::App;
-use kestrelcut::i18n::Lang;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
-    let mut lang = Lang::Ar;
     let mut demo = false;
     let mut selftest = None;
     let mut ppi: Option<f32> = None;
     let mut seek: Option<f64> = None;
+    let mut ws: Option<String> = None;
 
     let mut it = args.iter().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--lang" => {
-                if let Some(l) = it.next() {
-                    lang = if l == "en" { Lang::En } else { Lang::Ar };
-                }
-            }
             "--demo" => demo = true,
             "--selftest" => selftest = Some(kestrelcut::selftest::SelfTest::new()),
+            "--where" => {
+                // Diagnostics: print resolved FFmpeg/ffprobe and exit.
+                let rep = kestrelcut::media::where_report();
+                println!("{rep}");
+                let ok = kestrelcut::media::ffmpeg_ok();
+                if !ok { eprintln!("ERROR: no usable ffmpeg"); }
+                std::process::exit(if ok { 0 } else { 1 });
+            }
             "--ppi" => ppi = it.next().and_then(|v| v.parse().ok()),
+            "--ws" => ws = it.next().map(|s| s.to_ascii_lowercase()),
             "--seek" => seek = it.next().and_then(|v| v.parse::<f64>().ok()),
             "--gen-icon" => {
                 let path = it.next().cloned().unwrap_or_else(|| "icon.png".into());
@@ -36,10 +39,11 @@ fn main() -> eframe::Result {
                 return Ok(());
             }
             "--help" | "-h" => {
-                println!("KestrelCut — feather-light video editor");
-                println!("  --lang ar|en   UI language (default: ar)");
+                println!("KestrelCut — feather-light video editor (FFmpeg bundled, works offline)");
                 println!("  --demo         preload demo media + populated timeline");
                 println!("  --selftest     run scripted end-to-end functional test");
+                println!("  --where        print resolved FFmpeg/ffprobe paths and exit");
+                println!("  --ws NAME      start workspace: edit|color|audio|fx|export");
                 println!("  --ppi N        override pixels-per-point");
                 println!("  --gen-icon P [SIZE]  write app icon (png/ico) and exit");
                 return Ok(());
@@ -78,8 +82,17 @@ fn main() -> eframe::Result {
             if let Some(p) = ppi {
                 cc.egui_ctx.set_pixels_per_point(p);
             }
-            let mut app = App::new(cc, lang, demo, selftest);
+            let mut app = App::new(cc, demo, selftest);
             app.pending_seek = seek;
+            if let Some(w) = ws {
+                app.workspace = match w.as_str() {
+                    "color" => kestrelcut::app::Workspace::Color,
+                    "audio" => kestrelcut::app::Workspace::Audio,
+                    "fx" | "effects" => kestrelcut::app::Workspace::Fx,
+                    "export" | "deliver" => kestrelcut::app::Workspace::Export,
+                    _ => kestrelcut::app::Workspace::Edit,
+                };
+            }
             Ok(Box::new(app))
         }),
     )

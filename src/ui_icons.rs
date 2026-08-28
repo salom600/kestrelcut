@@ -194,6 +194,36 @@ pub fn film(p: &Painter, r: Rect, col: Color32) {
     }
 }
 
+/// Hollow film icon — used to distinguish the "video" pool filter.
+pub fn film_outline(p: &Painter, r: Rect, col: Color32) {
+    let c = c(r);
+    let u = s(r) * 0.32;
+    let st = Stroke::new(s(r) * 0.08, col);
+    p.rect_stroke(Rect::from_min_max(Pos2::new(c.x - u, c.y - u * 0.7), Pos2::new(c.x + u, c.y + u * 0.7)), 1.5, st, egui::StrokeKind::Outside);
+    let tri = |dx: f32| egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(c.x + dx - u * 0.16, c.y - u * 0.3),
+            Pos2::new(c.x + dx - u * 0.16, c.y + u * 0.3),
+            Pos2::new(c.x + dx + u * 0.28, c.y),
+        ],
+        col, Stroke::NONE);
+    p.add(tri(-u * 0.22));
+    p.add(tri(u * 0.28));
+}
+
+/// 2×2 grid of squares — "show all media" filter.
+pub fn grid_all(p: &Painter, r: Rect, col: Color32) {
+    let c = c(r);
+    let u = s(r) * 0.30;
+    let g = u * 0.14;
+    let sz = u - g;
+    for (dx, dy) in [(-1.0f32, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+        let x = c.x + dx * (sz / 2.0 + g / 2.0);
+        let y = c.y + dy * (sz / 2.0 + g / 2.0);
+        p.rect_filled(Rect::from_center_size(Pos2::new(x, y), Vec2::splat(sz)), 1.5, col);
+    }
+}
+
 pub fn note(p: &Painter, r: Rect, col: Color32) {
     let c = c(r);
     let u = s(r) * 0.28;

@@ -61,12 +61,39 @@ pub struct Grade {
     pub highlights: f32,
     pub whites: f32,
     pub blacks: f32,
+    /// Vibrance -100..100 (saturates low-saturation colors first).
+    #[serde(default)]
+    pub vibrance: f32,
+    /// Lift color wheel (shadows), per-channel -1..1.
+    #[serde(default)]
+    pub lift: [f32; 3],
+    /// Gamma color wheel (midtones), per-channel -1..1.
+    #[serde(default)]
+    pub gamma: [f32; 3],
+    /// Gain color wheel (highlights), per-channel -1..1.
+    #[serde(default)]
+    pub gain: [f32; 3],
+    /// Master offset (brightness) -100..100.
+    #[serde(default)]
+    pub offset: f32,
 }
 impl Default for Grade {
-    fn default() -> Self { Self { temp: 0.0, tint: 0.0, exposure: 0.0, contrast: 0.0, saturation: 0.0, highlights: 0.0, whites: 0.0, blacks: 0.0 } }
+    fn default() -> Self {
+        Self { temp: 0.0, tint: 0.0, exposure: 0.0, contrast: 0.0, saturation: 0.0,
+               highlights: 0.0, whites: 0.0, blacks: 0.0,
+               vibrance: 0.0, lift: [0.0; 3], gamma: [0.0; 3], gain: [0.0; 3], offset: 0.0 }
+    }
 }
 impl Grade {
     pub fn is_default(&self) -> bool { *self == Grade::default() }
+    /// True when any color wheel deviates from neutral.
+    pub fn wheels_active(&self) -> bool {
+        self.lift.iter().any(|v| v.abs() > 0.005)
+            || self.gamma.iter().any(|v| v.abs() > 0.005)
+            || self.gain.iter().any(|v| v.abs() > 0.005)
+            || self.offset.abs() > 0.5
+            || self.vibrance.abs() > 0.5
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Default)]
