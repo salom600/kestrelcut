@@ -32,9 +32,39 @@ KestrelCut is a professional non-linear video editor built around two ideas:
   Tint, Exposure, Contrast, Saturation, Vibrance, Highlights/Whites/Blacks,
   LUT (.cube) loader, one-click looks — all rendered through real FFmpeg
   filters in both preview *and* export (WYSIWYG).
-- **Real tools** — select, razor, slip, pen (audio keyframes), magnetic snap
-  toggle, trim/slide, transforms (position / scale / rotate / opacity),
-  speed, blur, fades, volume envelopes, titles.
+- **Real tools** — select, razor, **roll**, **slide**, slip, pen (audio
+  keyframes), hand, zoom, text — now with a visible tool strip. Cut / copy /
+  paste, **multi-select + group/ungroup** (clips that move & delete together),
+  **freeze frame**, **reverse** (≤ 60 s source), ripple delete, magnetic snap
+  with visual snap indicators, in/out marks, markers, beat detection.
+- **Transitions** — Cross Dissolve, Dip to Black, Wipe ←/→, Slide ←/→, Zoom:
+  rendered live in the preview (real mesh math) and exported through FFmpeg
+  `xfade` (identical math), with automatic source-room clamping.
+- **Compositing** — 9 blend modes (Normal/Multiply/Screen/Overlay/Soft·Hard
+  Light/Darken/Lighten/Difference): exact per-pixel software compositor in
+  the preview, real FFmpeg `blend` at export. **Adjustment layers** apply
+  their grade/FX to everything below. Shape **masks** (rect/ellipse with
+  feather + invert) and **Chroma Key** (green screen with spill suppression).
+- **Keyframe animation** — Position X/Y, Scale, Rotation, Opacity with
+  per-keyframe easing (Linear / Ease In / Out / In-Out); interpolated live in
+  the preview and exported as FFmpeg expressions.
+- **Effects rack** — Sharpen, Denoise, Vignette, Hue Rotate, Glow, Deband,
+  Lens Correction, Grayscale, Sepia, Blur + LUT (.cube) — every one a real
+  FFmpeg filter, identical in preview and export.
+- **Audio suite** — waveform displays, clip gain, fades, 3-band EQ,
+  compressor, limiter, de-esser, noise reduction (afftdn), reverb/echo,
+  voice-clarity boost, volume envelopes, **auto-ducking** (analyzes the voice
+  waveform and dips the music), beat detection → markers. The rack runs
+  identically in the preview monitor and the export mixdown.
+- **Titles & subtitles** — shaped text via **rustybuzz + unicode-bidi**
+  (real Arabic RTL with contextual glyph joining — مرحبا renders correctly),
+  5 title presets (Main/Lower Third/Top Caption/Subtitle/Big Dark), position,
+  background bar, shadow, safe-margin overlay, and **.srt import**.
+- **Smooth by design** — streaming decoders with skip-ahead scrubbing
+  (no per-frame process spawns), pipe-backpressure pacing, coalesced preview
+  invalidation while dragging, drag & drop from the media pool onto any track
+  with ghost preview + snap line + edge auto-scroll, resizable panels, and
+  animated collapsible inspector sections.
 - **Hardware-accelerated export** — auto-detects NVENC / Intel QSV / AMD AMF;
   H.264, H.265/HEVC and AV1 (SVT-AV1) with live progress; the UI never blocks.
 - **Proxy workflow for low-spec PCs** — one click generates 540p proxies;
@@ -76,3 +106,33 @@ KC_SELFTEST_REPORT=report.json ./target/release/kestrelcut --selftest
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Scope honesty (no fake buttons)
+
+Every control in KestrelCut performs real work through the bundled FFmpeg or
+in-app engines. Features from "big NLE" checklists that would require faking
+are deliberately **not** shipped:
+
+- **Multicam / nested sequences / compound clips** — not implemented (would
+  require a nested timeline renderer to be honest; groups cover basic
+  multi-clip workflows).
+- **Motion tracking, camera tracking, mask tracking, rotoscope, puppet pin,
+  particle systems, pen/vector shapes, motion paths** — not implemented
+  (would need OpenCV-class CV; a hidden or dead button would be dishonest).
+- **Third-party plugins** (Red Giant / Boris FX / Sapphire) — impossible by
+  design (proprietary host SDKs).
+- **Auto-captions (speech-to-text)**, **music library**, **5.1/7.1 surround**,
+  **HDR / RAW / color-space management** — not implemented in v0.3.
+- **Reverse** previews at ~10 fps (export is full quality; source ≤ 60 s due
+  to the FFmpeg reverse filter's memory model).
+- **Speed ramping / time-remap curves** — constant speed per clip only.
+- **Stabilization** appears **only when the bundled FFmpeg actually ships
+  vidstab** (runtime capability probe — the button is real or absent).
+
+## Keyboard
+
+`Space` play · `S` split · `A/C/U/J/P/G/H/Z/T` tools · `I/O` in/out ·
+`M` marker · `F` freeze frame · `R` reverse · `Ctrl+C/X/V` copy/cut/paste ·
+`Ctrl+G` / `Ctrl+Shift+G` group/ungroup · `Ctrl+Z/Y` undo/redo ·
+`Ctrl+S` save · `Ctrl+E` export · `Ctrl+=/-` zoom · `←/→` (+Shift = 1 s) ·
+`Home/End` · `L` loop · `Esc` deselect.

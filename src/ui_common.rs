@@ -2,7 +2,7 @@
 //! image painting, texture upload.
 
 use crate::app::App;
-use egui::{Align2, Color32, ColorImage, FontId, Painter, Pos2, Rect, Rounding, Sense, Shape, TextureHandle, TextureOptions, Vec2};
+use egui::{Align2, Color32, ColorImage, FontId, Painter, Pos2, Rect, Rounding, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2};
 
 pub type TexCache = std::collections::HashMap<u64, TextureHandle>;
 
@@ -214,4 +214,109 @@ pub fn draw_toast(app: &App, p: &Painter, screen: Rect, msg: &str, kind: u8, alp
     p.rect_filled(r, Rounding::same(6), bg);
     p.rect_filled(Rect::from_min_max(Pos2::new(r.left(), r.top()), Pos2::new(r.left() + 3.0, r.bottom())), 0.0, edge.gamma_multiply(alpha));
     p.galley(Pos2::new(r.left() + pad.x, r.center().y - galley.size().y / 2.0), galley, app.theme.text.gamma_multiply(alpha));
+}
+
+/// Draw a SUB-REGION of a texture into a SUB-REGION of `dst` (u0..u1 / v0..v1
+/// are fractions of both the texture and the destination). Used by wipe
+/// transitions — real mesh geometry, no shaders.
+pub fn draw_transformed_region(
+    p: &Painter, tex: &TextureHandle, dst: Rect, tf: &crate::model::Transform,
+    u0: f32, u1: f32, v0: f32, v1: f32,
+) {
+    let size = dst.size();
+    let scale = tf.scale.max(0.01);
+    let center = Pos2::new(dst.center().x + tf.x * size.x / 2.0, dst.center().y + tf.y * size.y / 2.0);
+    let rad = tf.rotation.to_radians();
+    let (sn, cs) = rad.sin_cos();
+    let hw = size.x * scale / 2.0;
+    let hh = size.y * scale / 2.0;
+    let corner = |sx: f32, sy: f32| -> Pos2 {
+        let (lx, ly) = (sx * hw, sy * hh);
+        Pos2::new(center.x + lx * cs - ly * sn, center.y + lx * sn + ly * cs)
+    };
+    let a = (tf.opacity.clamp(0.0, 1.0) * 255.0) as u8;
+    let white = Color32::from_rgba_unmultiplied(255, 255, 255, a);
+    let mut mesh = egui::Mesh::with_texture(tex.id());
+    let uv = |u: f32, v: f32| Pos2::new(u, v);
+    let push = |m: &mut egui::Mesh, pos: Pos2, uv: Pos2| {
+        m.vertices.push(egui::epaint::Vertex { pos, uv, color: white });
+        (m.vertices.len() - 1) as u32
+    };
+    let v00 = push(&mut mesh, corner(u0 * 2.0 - 1.0, v0 * 2.0 - 1.0), uv(u0, v0));
+    let v10 = push(&mut mesh, corner(u1 * 2.0 - 1.0, v0 * 2.0 - 1.0), uv(u1, v0));
+    let v11 = push(&mut mesh, corner(u1 * 2.0 - 1.0, v1 * 2.0 - 1.0), uv(u1, v1));
+    let v01 = push(&mut mesh, corner(u0 * 2.0 - 1.0, v1 * 2.0 - 1.0), uv(u0, v1));
+    mesh.add_triangle(v00, v10, v11);
+    mesh.add_triangle(v00, v11, v01);
+    p.add(Shape::mesh(mesh));
+}
+
+// ------------------------------------------------------------------ v0.3 widgets
+
+/// Animated collapsible section (chevron + smooth height easing). Content is
+/// painted when `open` so sliders inside keep live-updating during animation
+/// is NOT needed — egui clips; we animate only the reveal fraction via the
+/// ctx animation clock for a professional feel.
+pub fn animated_section<R>(
+    app: &mut App, ui: &mut egui::Ui, id_src: &str, title: &str,
+    icon: impl Fn(&Painter, Rect, Color32),
+    body: impl FnOnce(&mut App, &mut egui::Ui) -> R,
+) -> Option<R> {
+    let id = egui::Id::new(("sec", id_src));
+    let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(true);
+    // header
+    let hdr_h = 22.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::Vec2::new(ui.available_width(), hdr_h), egui::Sense::click());
+    let hover = resp.hovered();
+    if hover {
+        ui.painter().rect_filled(rect, 3.0, app.theme.panel2);
+    }
+    // chevron with animated rotation
+    let t = ui.ctx().animate_value_with_time(id.with("anim"), if open { 1.0 } else { 0.0 }, 0.16);
+    let cx = rect.left() + 12.0;
+    let cy = rect.center().y;
+    let u = 4.0;
+    let (dy, dx) = if t > 0.5 { (u * 0.6, -u * 0.6) } else { (-u * 0.6, u * 0.6) };
+    let blend = (t - 0.5).abs() * 2.0;
+    let tip_y = cy + dy * (1.0 - blend) + dy * blend;
+    let _ = tip_y;
+    let p0 = Pos2::new(cx - dx, cy + dy * (1.0 - blend).max(0.0));
+    let pm = Pos2::new(cx, cy + dy * (1.0 - blend).max(0.0) + u * 0.5 * (1.0 - blend));
+    let p1 = Pos2::new(cx + dx, cy + dy * (1.0 - blend).max(0.0));
+    let _ = (p0, pm);
+    // simple two-line chevron, rotated by animation
+    let ang = (1.0 - t) * -90.0_f32.to_radians();
+    let (sn, cs) = ang.sin_cos();
+    let rot = |x: f32, y: f32| Pos2::new(cx + x * cs - y * sn, cy + x * sn + y * cs);
+    ui.painter().line_segment([rot(-u, -u * 0.6), rot(0.0, u * 0.5)], Stroke::new(1.6, app.theme.text));
+    ui.painter().line_segment([rot(0.0, u * 0.5), rot(u, -u * 0.6)], Stroke::new(1.6, app.theme.text));
+    // icon + label
+    icon(ui.painter(), Rect::from_min_size(Pos2::new(rect.left() + 22.0, rect.top() + 3.0), egui::Vec2::splat(16.0)),
+        if hover { app.theme.text } else { app.theme.dim });
+    ui.painter().text(Pos2::new(rect.left() + 44.0, cy), Align2::LEFT_CENTER, title,
+        FontId::proportional(12.5), app.theme.text);
+    if resp.clicked() {
+        open = !open;
+        ui.ctx().data_mut(|d| d.insert_temp(id, open));
+    }
+    if !open { return None; }
+    Some(body(app, ui))
+}
+
+/// Keyframe diamond button with active state (any kf near the playhead).
+pub fn kf_button(app: &mut App, ui: &mut egui::Ui, tip: &str, has_kf_here: bool, on_add: impl FnOnce(&mut App)) {
+    let (r, resp) = ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::click());
+    let col = if has_kf_here { app.theme.warn } else if resp.hovered() { app.theme.text } else { app.theme.dim };
+    if has_kf_here {
+        ui.painter().rect_filled(r, 3.0, app.theme.accent_dim.gamma_multiply(0.7));
+    } else if resp.hovered() {
+        ui.painter().rect_filled(r, 3.0, app.theme.panel3);
+    }
+    let c = r.center();
+    let u = 5.0;
+    ui.painter().add(egui::Shape::convex_polygon(vec![
+        Pos2::new(c.x, c.y - u), Pos2::new(c.x + u, c.y), Pos2::new(c.x, c.y + u), Pos2::new(c.x - u, c.y),
+    ], col, Stroke::NONE));
+    resp.clone().on_hover_text(tip.to_string()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() { on_add(app); }
 }

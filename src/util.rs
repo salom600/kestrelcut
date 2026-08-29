@@ -133,3 +133,13 @@ pub fn fmt_bytes(b: u64) -> String {
     }
     if i == 0 { format!("{b} B") } else { format!("{v:.1} {}", U[i]) }
 }
+
+/// Deterministic pastel per group id (timeline group badge dots).
+pub fn group_color(g: u64) -> egui::Color32 {
+    const PALETTE: [[u8; 3]; 8] = [
+        [246, 178, 107], [118, 215, 196], [236, 135, 192], [155, 187, 244],
+        [222, 226, 116], [186, 155, 244], [116, 226, 143], [244, 155, 155],
+    ];
+    let c = PALETTE[(g as usize) % PALETTE.len()];
+    egui::Color32::from_rgb(c[0], c[1], c[2])
+}

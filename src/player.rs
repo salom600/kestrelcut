@@ -13,35 +13,33 @@ impl Quality {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum Tool { Select, Razor, Slip, Pen, Hand, Zoom, Text }
+pub enum Tool { Select, Razor, Slip, Pen, Hand, Zoom, Text, Roll, Slide }
 impl Tool {
-    pub fn all() -> [Tool; 7] { [Tool::Select, Tool::Razor, Tool::Slip, Tool::Pen, Tool::Hand, Tool::Zoom, Tool::Text] }
+    pub fn all() -> [Tool; 9] { [Tool::Select, Tool::Razor, Tool::Roll, Tool::Slide, Tool::Slip, Tool::Pen, Tool::Hand, Tool::Zoom, Tool::Text] }
 }
 
-/// One active decode slot (per video track).
+/// One active decode slot, keyed by CLIP id (a transition window keeps two
+/// live slots on the same track — one for the outgoing clip, one incoming).
 pub struct Slot {
-    pub track_id: u64,
     pub clip_id: u64,
-    pub key: u64, // (clip, filters, quality, mode) — NOT time bucket
+    /// (clip, filters, quality) hash — changes restart the decoder.
+    pub key: u64,
     pub dec: Option<Decoder>,
+    /// Last frame chosen for display.
     pub frame: Option<Frame>,
+    /// Source position the current decoder's pts 0 corresponds to.
+    pub dec_origin: f64,
     pub eof: bool,
-    /// Player clock when the running decoder was started (Run drift check).
-    pub origin_clock: f64,
-    /// seek_gen at decoder start; mismatch = user seeked → restart Run.
-    pub seek_gen: u64,
-    /// Frame-time bucket of the last Still grab (paused scrubbing).
-    pub still_bucket: u64,
     /// Last decode failure message (shown in the preview overlay).
     pub decode_error: Option<String>,
-    /// True when `frame` came from the CURRENT decoder generation (a frame
-    /// kept across a restart is stale — its pts must not drive drift checks).
+    /// True when `frame` came from the CURRENT decoder generation.
     pub frame_current: bool,
-    /// Wall time of the last frame delivery from the current decoder (stall
-    /// detection) — `None` until the first frame arrives.
+    /// Wall time of the last new frame from the decoder (stall detection).
     pub last_frame_at: Option<std::time::Instant>,
     /// Wall time when the current decoder was started.
     pub started_at: std::time::Instant,
+    /// Reverse-clip grab bucket (throttled still mode).
+    pub rev_bucket: u64,
 }
 
 #[derive(Default)]
@@ -55,7 +53,7 @@ pub struct Player {
     pub audio: Option<Monitor>,
     pub audio_clip: Option<u64>,
     pub last_frame_for_scopes: Option<(u32, u32, std::sync::Arc<Vec<u8>>)>,
-    /// Bumped on every seek; lets Run decoders detect user seeks.
+    /// Bumped on every seek; lets decoders detect user seeks.
     pub seek_gen: u64,
     /// True once the engine produced at least one preview frame.
     pub ever_had_frame: bool,
@@ -93,27 +91,17 @@ impl Player {
         self.clock = nt;
     }
 
-    pub fn slot_for(&mut self, track_id: u64) -> Option<&mut Slot> {
-        self.slots.iter_mut().find(|s| s.track_id == track_id)
+    pub fn slot_for_clip_mut(&mut self, clip_id: u64) -> Option<&mut Slot> {
+        self.slots.iter_mut().find(|s| s.clip_id == clip_id)
     }
 
     pub fn active_frames(&self) -> impl Iterator<Item = (&Slot, &Frame)> {
         self.slots.iter().filter_map(|s| s.frame.as_ref().map(|f| (s, f)))
     }
-
-    /// Memory bookkeeping: drop frame buffers for slots no longer active.
-    pub fn gc(&mut self, valid_track_ids: &[u64]) {
-        self.slots.retain(|s| valid_track_ids.contains(&s.track_id));
-    }
-
-    pub fn fps_effective(&self, project_fps: f64) -> f64 { project_fps * self.speed as f64 }
 }
 
 /// Hash helper for decoder restart keys.
 pub fn hash_key(vals: &[u64]) -> u64 {
-    use std::hash::{BuildHasher, Hasher};
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    // deterministic-enough local key: FNV-1a
     let mut hash: u64 = 0xcbf29ce484222325;
     for v in vals {
         let mut b = *v;
@@ -123,11 +111,10 @@ pub fn hash_key(vals: &[u64]) -> u64 {
             b >>= 8;
         }
     }
-    h.write_u64(hash);
     hash
 }
 
-/// Frame-time bucket for seek keys.
+/// Frame-time bucket for seek keys / reverse-clip throttling.
 pub fn bucket(t: f64, fps: f64) -> u64 { (t.max(0.0) * fps.max(1.0)).floor() as u64 }
 
 pub type TexCache = HashMap<u64, egui::TextureHandle>;

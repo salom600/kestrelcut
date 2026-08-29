@@ -2,34 +2,41 @@
 //!
 //! Stability contract: bounded channel (4 frames) + process isolation + kill
 //! on drop. A stuck/crashing decoder can never hang or crash the UI.
+//!
+//! v0.3 smoothness model: decoders ALWAYS stream (no per-frame restarts).
+//! Pacing comes free from backpressure — when the UI stops draining, the
+//! bounded channel fills, ffmpeg blocks writing to the pipe, decoding pauses.
+//! Seeking forward drains (skips) frames as fast as the decoder produces
+//! them; only BACKWARD seeks past the hysteresis restart the process.
 
 use crate::media;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
 
 #[derive(Clone)]
 pub struct DecoderReq {
     pub path: PathBuf,
+    /// Source offset the stream starts at (decoder pts 0 == this position).
     pub src_in: f64,
     pub filters: String, // full chain incl. scale/fps/format=rgba
     pub w: u32,
     pub h: u32,
+    /// Output frame rate (frames per stream-second). The fps filter emits CFR.
     pub fps: f64,
-    /// Still = grab exactly one frame (paused / scrubbing, fast seek).
-    /// Run  = stream continuously paced at `fps` (playback).
+    /// Still = grab exactly one frame then stop (reverse-clip preview and
+    /// thumbnails). Stream = continuous playback.
     pub mode: DecodeMode,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum DecodeMode { Still, Run }
+pub enum DecodeMode { Still, Stream }
 
 #[derive(Clone)]
 pub struct Frame {
-    pub pts: f64, // seconds from decode start (clip-relative)
+    pub pts: f64, // seconds from decode start (== seconds after src_in)
     pub w: u32,
     pub h: u32,
     pub rgba: Arc<Vec<u8>>,
@@ -47,6 +54,7 @@ pub struct Decoder {
     pub w: u32,
     pub h: u32,
     pub src_in: f64,
+    /// Newest frame drained so far (kept so scrubbing never goes black).
     latest: Option<Frame>,
     eof: bool,
     pub last_error: Option<String>,
@@ -96,23 +104,16 @@ impl Decoder {
         }
 
         let (tx, rx) = sync_channel::<DecEvent>(4);
-        let (w, h, fps) = (req.w.max(2), req.h.max(2), req.fps.max(1.0));
+        let (w, h) = (req.w.max(2), req.h.max(2));
         let still = req.mode == DecodeMode::Still;
+        // NOTE: no pacing sleeps — backpressure through the bounded channel
+        // (and the OS pipe) throttles the decoder to the UI's drain rate.
         std::thread::Builder::new().name("decoder".into()).spawn(move || {
             let mut pipe = stdout;
             let frame_len = (w as usize) * (h as usize) * 4;
             let mut buf = vec![0u8; frame_len];
-            let t0 = Instant::now();
             let mut n = 0u64;
             loop {
-                // pacing (Run mode only): deliver frames at the sequence rate
-                if !still {
-                    let target = Duration::from_secs_f64(n as f64 / fps);
-                    let elapsed = t0.elapsed();
-                    if target > elapsed {
-                        std::thread::sleep(target - elapsed);
-                    }
-                }
                 match read_exact_or_eof(&mut pipe, &mut buf) {
                     Ok(true) => {}
                     Ok(false) => { break; }
@@ -123,7 +124,7 @@ impl Decoder {
                     }
                 }
                 let frame = Frame {
-                    pts: n as f64 / fps,
+                    pts: n as f64 / req.fps.max(1.0),
                     w, h,
                     rgba: Arc::new(buf.clone()),
                 };
@@ -145,12 +146,30 @@ impl Decoder {
         Ok(Decoder { child: Some(child), rx, w, h, src_in: req.src_in, latest: None, eof: false, last_error: None })
     }
 
-    /// Drain events; returns the newest frame (stale ones are dropped —
-    /// bounded latency, bounded memory).
-    pub fn poll(&mut self) -> Option<Frame> {
+    /// Drain events. When `until_pts` is set, frames older than it are
+    /// discarded (forward skip) and the newest frame at/before it is kept.
+    /// Returns the frame to display.
+    pub fn poll(&mut self, until_pts: Option<f64>) -> Option<Frame> {
         loop {
             match self.rx.try_recv() {
-                Ok(DecEvent::Frame(f)) => { self.latest = Some(f); }
+                Ok(DecEvent::Frame(f)) => {
+                    match until_pts {
+                        Some(tp) if f.pts <= tp + 1e-3 => {
+                            // this frame is at/before the target — display it
+                            self.latest = Some(f);
+                        }
+                        Some(tp) => {
+                            // first frame BEYOND the target: if we have nothing
+                            // at/before yet, take it (nearest available);
+                            // otherwise keep the earlier one and push nothing
+                            // back (bounded channel — dropping is fine, the
+                            // decoder is ahead of the target now).
+                            if self.latest.is_none() { self.latest = Some(f); }
+                            else { break; }
+                        }
+                        None => { self.latest = Some(f); }
+                    }
+                }
                 Ok(DecEvent::Eof) => { self.eof = true; break; }
                 Ok(DecEvent::Failed(msg)) => { self.eof = true; self.last_error = Some(msg); break; }
                 Err(TryRecvError::Empty) => break,
@@ -162,6 +181,8 @@ impl Decoder {
 
     pub fn is_eof(&self) -> bool { self.eof }
     pub fn has_frame(&self) -> bool { self.latest.is_some() }
+    /// pts of the newest drained frame (decoder position on its own timeline).
+    pub fn head_pts(&self) -> Option<f64> { self.latest.as_ref().map(|f| f.pts) }
 }
 
 fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<bool, ()> {
@@ -199,7 +220,9 @@ pub mod audio {
     }
 
     /// Single-clip audio monitor: pipes s16le stereo from ffmpeg into the
-    /// default output device via cpal. Degrades gracefully without a device.
+    /// default output device via cpal. Honors the per-clip processing chain
+    /// so the preview matches the export. Degrades gracefully without a
+    /// device.
     pub struct Monitor {
         child: Child,
         _handle: std::thread::JoinHandle<()>,
@@ -207,20 +230,22 @@ pub mod audio {
     }
 
     impl Monitor {
-        pub fn start(path: PathBuf, src_in: f64, dur: f64) -> Option<Monitor> {
+        pub fn start(path: PathBuf, src_in: f64, dur: f64, filters: &str) -> Option<Monitor> {
             use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
             let device = cpal::default_host().default_output_device()?;
             let cfg = device.default_output_config().ok()?;
             let bin = media::ffmpeg()?;
-            let mut child = Command::new(bin)
-                .args(["-hide_banner", "-loglevel", "error",
-                       "-ss", &format!("{src_in:.3}"), "-t", &format!("{dur:.3}"),
-                       "-i", &path.to_string_lossy(),
-                       "-ac", "2", "-ar", "48000", "-f", "s16le", "pipe:1"])
+            let mut cmd = Command::new(bin);
+            cmd.args(["-hide_banner", "-loglevel", "error",
+                      "-ss", &format!("{src_in:.3}"), "-t", &format!("{dur:.3}"),
+                      "-i", &path.to_string_lossy(), "-ac", "2", "-ar", "48000"]);
+            if !filters.is_empty() {
+                cmd.args(["-af", filters]);
+            }
+            cmd.args(["-f", "s16le", "pipe:1"])
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .ok()?;
+                .stderr(Stdio::null());
+            let mut child = cmd.spawn().ok()?;
             let stdout = child.stdout.take()?;
             let ring = Arc::new(Mutex::new(Ring { q: VecDeque::with_capacity(96_000), cap: 96_000 }));
             let ring_w = ring.clone();
@@ -275,11 +300,6 @@ pub mod audio {
             stream.play().ok()?;
             Some(Monitor { child, _handle: handle, stream })
         }
-
-        pub fn finished(&self) -> bool {
-            // pipe ended and ring drained → monitor is done
-            false // conservatively keep until stopped/restarted
-        }
     }
 
     impl Drop for Monitor {
@@ -297,6 +317,6 @@ pub mod audio {
     use std::path::PathBuf;
     pub struct Monitor;
     impl Monitor {
-        pub fn start(_path: PathBuf, _src_in: f64, _dur: f64) -> Option<Monitor> { None }
+        pub fn start(_path: PathBuf, _src_in: f64, _dur: f64, _filters: &str) -> Option<Monitor> { None }
     }
 }

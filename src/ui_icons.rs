@@ -403,3 +403,119 @@ pub fn chevron(p: &Painter, r: Rect, col: Color32, right: bool) {
     p.line_segment([Pos2::new(c.x - d * u, c.y - u), Pos2::new(c.x + d * u, c.y)], st);
     p.line_segment([Pos2::new(c.x + d * u, c.y), Pos2::new(c.x - d * u, c.y + u)], st);
 }
+
+// ------------------------------------------------------------------ v0.3 icons
+pub fn safe_margins(p: &Painter, r: Rect, col: Color32) {
+    let st = Stroke::new(s(r) * 0.07, col);
+    let m = s(r) * 0.22;
+    p.rect_stroke(Rect::from_min_max(r.min + Vec2::splat(m * 0.6), r.max - Vec2::splat(m * 0.6)), 1.0, Stroke::new(s(r) * 0.045, col.gamma_multiply(0.55)), egui::StrokeKind::Inside);
+    p.rect_stroke(Rect::from_min_max(r.min + Vec2::splat(m), r.max - Vec2::splat(m)), 1.0, st, egui::StrokeKind::Inside);
+}
+
+pub fn freeze(p: &Painter, r: Rect, col: Color32) {
+    // snowflake-ish asterisk: frame + star
+    let c = c(r);
+    let u = s(r) * 0.3;
+    let st = Stroke::new(s(r) * 0.08, col);
+    for a in [0.0f32, 60.0, 120.0] {
+        let rad = a.to_radians();
+        p.line_segment([
+            Pos2::new(c.x - rad.cos() * u, c.y - rad.sin() * u),
+            Pos2::new(c.x + rad.cos() * u, c.y + rad.sin() * u)], st);
+    }
+}
+
+pub fn copy_icon(p: &Painter, r: Rect, col: Color32) {
+    let st = Stroke::new(s(r) * 0.08, col);
+    let u = s(r) * 0.26;
+    let c = c(r);
+    p.rect_stroke(Rect::from_min_max(Pos2::new(c.x - u * 1.5, c.y - u), Pos2::new(c.x - u * 0.1, c.y + u * 1.1)), 1.0, st, egui::StrokeKind::Inside);
+    p.rect_stroke(Rect::from_min_max(Pos2::new(c.x + u * 0.1, c.y - u * 1.1), Pos2::new(c.x + u * 1.5, c.y + u)), 1.0, st, egui::StrokeKind::Inside);
+}
+
+pub fn paste_icon(p: &Painter, r: Rect, col: Color32) {
+    let st = Stroke::new(s(r) * 0.08, col);
+    let c = c(r);
+    let u = s(r) * 0.28;
+    p.rect_stroke(Rect::from_min_max(Pos2::new(c.x - u, c.y - u * 1.2), Pos2::new(c.x + u, c.y + u * 1.2)), 1.0, st, egui::StrokeKind::Inside);
+    p.rect_filled(Rect::from_min_max(Pos2::new(c.x - u * 0.5, c.y - u * 1.5), Pos2::new(c.x + u * 0.5, c.y - u * 0.9)), 1.0, col);
+}
+
+pub fn group_icon(p: &Painter, r: Rect, col: Color32) {
+    let st = Stroke::new(s(r) * 0.08, col);
+    let c = c(r);
+    let u = s(r) * 0.28;
+    p.rect_stroke(Rect::from_min_max(Pos2::new(c.x - u * 1.4, c.y - u), Pos2::new(c.x - u * 0.2, c.y + u * 0.2)), 1.0, st, egui::StrokeKind::Inside);
+    p.rect_stroke(Rect::from_min_max(Pos2::new(c.x + u * 0.2, c.y - u * 0.2), Pos2::new(c.x + u * 1.4, c.y + u)), 1.0, st, egui::StrokeKind::Inside);
+}
+
+pub fn keyframe(p: &Painter, r: Rect, col: Color32) {
+    let c = c(r);
+    let u = s(r) * 0.3;
+    p.add(egui::Shape::convex_polygon(vec![
+        Pos2::new(c.x, c.y - u), Pos2::new(c.x + u, c.y), Pos2::new(c.x, c.y + u), Pos2::new(c.x - u, c.y),
+    ], col, Stroke::NONE));
+}
+
+pub fn roll(p: &Painter, r: Rect, col: Color32) {
+    let st = Stroke::new(s(r) * 0.08, col);
+    let c = c(r);
+    let u = s(r) * 0.3;
+    p.line_segment([Pos2::new(c.x, c.y - u), Pos2::new(c.x, c.y + u)], st);
+    let arr = |x: f32, dir: f32| {
+        p.add(egui::Shape::convex_polygon(vec![
+            Pos2::new(x + dir * u * 0.5, c.y), Pos2::new(x, c.y - u * 0.35), Pos2::new(x, c.y + u * 0.35)], col, Stroke::NONE));
+    };
+    arr(c.x - u * 0.25, -1.0);
+    arr(c.x + u * 0.25, 1.0);
+}
+
+pub fn slide_icon(p: &Painter, r: Rect, col: Color32) {
+    let st = Stroke::new(s(r) * 0.08, col);
+    let c = c(r);
+    let u = s(r) * 0.3;
+    p.rect_filled(Rect::from_min_max(Pos2::new(c.x - u * 0.35, c.y - u * 0.7), Pos2::new(c.x + u * 0.35, c.y + u * 0.7)), 1.0, col);
+    p.line_segment([Pos2::new(c.x - u, c.y), Pos2::new(c.x - u * 0.4, c.y)], st);
+    p.line_segment([Pos2::new(c.x + u * 0.4, c.y), Pos2::new(c.x + u, c.y)], st);
+}
+
+pub fn speed_icon(p: &Painter, r: Rect, col: Color32) {
+    let c = c(r);
+    let u = s(r) * 0.32;
+    p.add(egui::Shape::convex_polygon(vec![
+        Pos2::new(c.x - u, c.y - u * 0.8), Pos2::new(c.x - u, c.y + u * 0.8), Pos2::new(c.x + u, c.y)], col, Stroke::NONE));
+    let st = Stroke::new(s(r) * 0.07, col);
+    p.line_segment([Pos2::new(c.x - u * 1.2, c.y - u * 0.9), Pos2::new(c.x - u * 0.7, c.y - u * 0.9)], st);
+    p.line_segment([Pos2::new(c.x - u * 1.2, c.y + u * 0.9), Pos2::new(c.x - u * 0.7, c.y + u * 0.9)], st);
+}
+
+pub fn subtitle_icon(p: &Painter, r: Rect, col: Color32) {
+    let st = Stroke::new(s(r) * 0.07, col);
+    let c = c(r);
+    let u = s(r) * 0.34;
+    p.rect_stroke(Rect::from_min_max(Pos2::new(c.x - u, c.y - u * 0.75), Pos2::new(c.x + u, c.y + u * 0.75)), 1.0, st, egui::StrokeKind::Inside);
+    p.line_segment([Pos2::new(c.x - u * 0.65, c.y + u * 0.25), Pos2::new(c.x + u * 0.05, c.y + u * 0.25)], st);
+    p.line_segment([Pos2::new(c.x + u * 0.25, c.y + u * 0.25), Pos2::new(c.x + u * 0.65, c.y + u * 0.25)], st);
+}
+
+pub fn adjustment(p: &Painter, r: Rect, col: Color32) {
+    // three stacked translucent bars with the top one emphasized
+    let c = c(r);
+    let u = s(r) * 0.3;
+    let rows = [(60u8, -1.0f32), (110, -0.2), (255, 0.6)];
+    for (a, dy) in rows {
+        let y = c.y + dy * u;
+        p.rect_filled(Rect::from_min_max(Pos2::new(c.x - u, y), Pos2::new(c.x + u, y + u * 0.45)),
+            1.0, Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), a));
+    }
+}
+
+pub fn reverse(p: &Painter, r: Rect, col: Color32) {
+    let c = c(r);
+    let u = s(r) * 0.3;
+    let st = Stroke::new(s(r) * 0.08, col);
+    p.add(egui::Shape::line(arc_pts(c, u, 130.0, 320.0), st));
+    let tip = Pos2::new(c.x - u * 0.75, c.y + u * 0.55);
+    p.add(egui::Shape::convex_polygon(vec![
+        tip, Pos2::new(tip.x + u * 0.5, tip.y - u * 0.1), Pos2::new(tip.x + u * 0.18, tip.y - u * 0.55)], col, Stroke::NONE));
+}

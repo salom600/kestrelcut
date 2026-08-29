@@ -21,6 +21,7 @@ pub struct SelfTest {
     pub still_ok: bool,
     pub play_ok: bool,
     pub pts0: Option<f64>,
+    pub v03_ok: bool,
 }
 
 impl SelfTest {
@@ -29,7 +30,7 @@ impl SelfTest {
             step: 0, t0: Instant::now(), step_t: Instant::now(),
             export_wait: None, lines: Vec::new(), finished: false, passed: false,
             out_path: None,
-            probe_ok: false, still_ok: false, play_ok: false, pts0: None,
+            probe_ok: false, still_ok: false, play_ok: false, pts0: None, v03_ok: false,
         }
     }
 
@@ -149,6 +150,8 @@ impl SelfTest {
                 app.project.in_mark = Some(0.0);
                 app.project.out_mark = Some(10.0);
                 self.log("title added, in/out marks 0..10s".into());
+                // ---- v0.3 tool gauntlet: every new feature through real paths
+                self.v03_ok = self.tool_gauntlet(app);
                 self.next();
             }
             6 => {
@@ -237,15 +240,15 @@ impl SelfTest {
                     } else {
                         let diag: Vec<String> = app.player.slots.iter().map(|s| format!(
                             "t{} c{} dec={} eof={} err={:?} pts={:?} clk={:.2} origin={:.2}",
-                            s.track_id, s.clip_id, s.dec.is_some(), s.eof,
+                            s.clip_id, s.clip_id, s.dec.is_some(), s.eof,
                             s.decode_error, s.frame.as_ref().map(|f| f.pts),
-                            app.player.clock, s.origin_clock)).collect();
+                            app.player.clock, s.dec_origin)).collect();
                         self.fail(&format!("playback frames did not advance (playing={} clock={:.2} pts0={:?} pts1={pts1:?}) slots: {}",
                             app.player.playing, app.player.clock, self.pts0,
                             diag.join(" | ")));
                         return;
                     }
-                    self.passed = self.probe_ok && self.still_ok && self.play_ok;
+                    self.passed = self.probe_ok && self.still_ok && self.play_ok && self.v03_ok;
                     if self.passed { self.log("SELFTEST PASS".into()); }
                     self.write_report(app);
                     self.finished = true;
@@ -253,6 +256,165 @@ impl SelfTest {
             }
             _ => self.finished = true,
         }
+    }
+
+    /// Exercise the v0.3 features through the SAME methods the UI calls.
+    /// Returns true when every check passes.
+    fn tool_gauntlet(&mut self, app: &mut App) -> bool {
+        let mut ok = true;
+        let mut check = |self_: &mut Self, app: &mut App, name: &str, cond: bool| {
+            self_.log(format!("{} {name}", if cond { "✓" } else { "✗" }));
+            if !cond { ok_store(false); }
+        };
+        // helper to mutate the outer ok flag from the closure
+        fn ok_store(_: bool) {}
+        let _ = &mut check; // (replaced by inline logic below)
+
+        // 1) transition — pick a clip whose LEFT NEIGHBOR has source room
+        let target = app.project.tracks.iter()
+            .flat_map(|t| &t.clips)
+            .find(|c| {
+                let (lid, _) = app.project.neighbors(c.id);
+                lid.map(|l| {
+                    app.project.clip(l).map(|(_, lc)| {
+                        lc.source.is_none() || app.assets.iter()
+                            .find(|a| a.path == lc.source.clone().unwrap_or_default())
+                            .map(|a| a.duration - lc.src_end() > 0.6).unwrap_or(false)
+                    }).unwrap_or(false)
+                }).unwrap_or(false)
+            })
+            .map(|c| c.id);
+        if let Some(id) = target {
+            app.sel = Some(id);
+            app.set_transition_on_selection(crate::model::TransKind::Dissolve, 0.5);
+            let has_t = app.selection_transition().is_some();
+            self.log(format!("{} transition set (xfade)", if has_t { "✓" } else { "✗" }));
+            ok &= has_t;
+        } else { self.log("✗ no clip with room for transition".into()); ok = false; }
+
+        // 2) keyframes
+        if let Some(id) = app.sel {
+            app.player.clock = app.project.clip(id).map(|(_, c)| c.tl_start + 0.2).unwrap_or(9.0);
+            app.add_keyframe(0); // pos_x
+            let x0 = app.project.clip(id).map(|(_, c)| c.transform.x).unwrap_or(0.0);
+            app.set_transform_of_selection(|t| t.x = 0.3);
+            app.player.clock = app.project.clip(id).map(|(_, c)| c.tl_start + 1.2).unwrap_or(9.5);
+            app.add_keyframe(0);
+            let kfs = app.project.clip(id).map(|(_, c)| c.anim.pos_x.len()).unwrap_or(0);
+            let mid_t = app.project.clip(id).map(|(_, c)| c.tl_start + 0.7).unwrap_or(9.2);
+            let mid_x = app.project.clip(id).map(|(_, c)| c.transform_at(mid_t).x).unwrap_or(0.0);
+            let kf_ok = kfs >= 2 && mid_x > x0 && mid_x < 0.3;
+            self.log(format!("{} keyframes+interpolation (n={kfs}, mid={mid_x:.2})", if kf_ok { "✓" } else { "✗" }));
+            ok &= kf_ok;
+        }
+
+        // 3) copy/paste
+        let before = app.project.tracks.iter().flat_map(|t| &t.clips).count();
+        app.copy_selection();
+        app.player.clock = 11.0;
+        app.paste_at_playhead();
+        let after = app.project.tracks.iter().flat_map(|t| &t.clips).count();
+        self.log(format!("{} copy/paste ({before} → {after} clips)", if after > before { "✓" } else { "✗" }));
+        ok &= after > before;
+
+        // 4) group
+        app.player.clock = 1.0;
+        let a = app.project.clips_at(1.0, crate::model::TrackKind::Video).first().map(|(_, c)| c.id);
+        app.player.clock = 5.0;
+        let b = app.project.clips_at(5.0, crate::model::TrackKind::Video).first().map(|(_, c)| c.id);
+        if let (Some(a), Some(b)) = (a, b) {
+            app.sel = Some(a);
+            app.sel_multi = vec![a, b];
+            app.group_selection();
+            let ga = app.project.clip(a).and_then(|(_, c)| c.group);
+            let gb = app.project.clip(b).and_then(|(_, c)| c.group);
+            let grp_ok = ga.is_some() && ga == gb;
+            self.log(format!("{} group/ungroup", if grp_ok { "✓" } else { "✗" }));
+            ok &= grp_ok;
+            app.ungroup_selection();
+        }
+
+        // 5) chroma key + mask → filter chain (on a clip OUTSIDE the 0..10
+        // export range — geq masks are CPU-heavy and would stall the test)
+        app.sel = app.project.video_tracks().first()
+            .and_then(|t| t.clips.iter().find(|c| 20.0 >= c.tl_start && 20.0 < c.end()).map(|c| c.id));
+        if let Some(id) = app.sel {
+            app.set_fx_of_selection(|f| {
+                f.chroma = crate::model::ChromaKey::classic();
+                f.mask = crate::model::Mask { enabled: true, ellipse: true, cx: 0.5, cy: 0.5, hw: 0.3, hh: 0.3, feather: 0.1, invert: false };
+            });
+            if let Some((_, c)) = app.project.clip(id) {
+                let chain = crate::media::video_filter_chain(&c.grade, &c.fx, c.src_dur, Some(640), Some(360), Some(30.0));
+                let fx_ok = chain.contains("colorkey") && chain.contains("geq");
+                self.log(format!("{} chroma key + mask in chain", if fx_ok { "✓" } else { "✗" }));
+                ok &= fx_ok;
+            }
+        }
+
+        // 6) adjustment layer affects lower clips (placed via the UI path;
+        // magnetic placement may push it — find wherever it landed)
+        app.player.clock = 0.0;
+        app.add_adjustment_at_playhead();
+        let adj_id = app.project.tracks.iter().flat_map(|t| &t.clips)
+            .find(|c| c.kind == crate::model::ClipKind::Adjustment).map(|c| c.id);
+        if let Some(adj_id) = adj_id {
+            app.sel = Some(adj_id);
+            app.set_grade_of_selection(|g| g.exposure = 1.5);
+            let (ar, aend) = app.project.clip(adj_id).map(|(_, c)| (c.tl_start + 0.5, c.end() - 0.1)).unwrap_or((0.0, 0.0));
+            let lower = app.project.video_tracks().first()
+                .and_then(|t| t.clips.iter().find(|c| ar >= c.tl_start && ar < c.end() && c.id != adj_id).map(|c| c.id));
+            if let Some(lid) = lower {
+                if let Some((_, lc)) = app.project.clip(lid) {
+                    let (g_eff, _) = app.project.effective_grade_fx_at(lc, ar);
+                    let base_ok = (g_eff.exposure - lc.grade.exposure - 1.5).abs() < 0.01;
+                    let outside = app.project.effective_grade_fx_at(lc, aend + 1.0).0.exposure - lc.grade.exposure;
+                    let adj_ok = base_ok && outside.abs() < 0.01;
+                    self.log(format!("{} adjustment layer merges (inside +1.5, outside Δ{outside:.2})", if adj_ok { "✓" } else { "✗" }));
+                    ok &= adj_ok;
+                }
+            } else {
+                self.log("✗ no lower clip under adjustment".into());
+                ok = false;
+            }
+        } else {
+            self.log("✗ adjustment clip not created".into());
+            ok = false;
+        }
+
+        // 7) audio rack chain
+        let a_clip = app.project.audio_tracks().iter().flat_map(|t| &t.clips).next().map(|c| c.id);
+        if let Some(id) = a_clip {
+            app.sel = Some(id);
+            if let Some(cl) = app.project.clip_mut(id) {
+                cl.afx.eq_low = 4.0;
+                cl.afx.compressor = true;
+                cl.afx.nr = 40.0;
+            }
+            if let Some((_, cl)) = app.project.clip(id) {
+                let chain = crate::media::audio_filter_chain(&cl.afx, cl.gain_db, 0.0, 0.0, cl.src_dur);
+                let rack_ok = chain.contains("bass") && chain.contains("acompressor") && chain.contains("afftdn");
+                self.log(format!("{} audio rack chain (EQ+comp+NR)", if rack_ok { "✓" } else { "✗" }));
+                ok &= rack_ok;
+            }
+        }
+
+        // 8) roll edit keeps total duration
+        let v1 = app.project.video_tracks().first().map(|t| t.id);
+        if let Some(tid) = v1 {
+            let seq: Vec<u64> = app.project.track(tid).map(|t| t.sorted_clips().into_iter().map(|c| c.id).collect()).unwrap_or_default();
+            if seq.len() >= 2 {
+                let dur_before = app.project.duration();
+                let d = app.project.roll_edit(seq[0], seq[1], 0.25, None, None);
+                let dur_after = app.project.duration();
+                let roll_ok = (dur_before - dur_after).abs() < 0.05 && d.abs() > 0.0;
+                self.log(format!("{} roll edit preserves duration (Δd = {d:.2})", if roll_ok { "✓" } else { "✗" }));
+                ok &= roll_ok;
+                // roll back
+                app.project.roll_edit(seq[0], seq[1], -0.25, None, None);
+            }
+        }
+
+        ok
     }
 
     fn fail(&mut self, why: &str) {

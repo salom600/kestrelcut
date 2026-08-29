@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod app_ui;
+pub mod compositor;
 pub mod decoder;
 pub mod exporter;
 pub mod fonts;
@@ -10,6 +11,8 @@ pub mod media;
 pub mod model;
 pub mod player;
 pub mod selftest;
+pub mod subs;
+pub mod textshape;
 pub mod ui_common;
 pub mod ui_dialogs;
 pub mod ui_icons;

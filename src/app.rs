@@ -7,7 +7,7 @@ use crate::media::{self, MediaEvent, MediaInfo};
 use crate::model::{Clip, History, MediaAsset, Project, TrackKind};
 use crate::player::{bucket, hash_key, Player, Quality, Slot, Tool};
 use crate::util::Theme;
-use egui::TextureHandle;
+use egui::{Pos2, Rect, TextureHandle};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -26,7 +26,7 @@ pub struct FsState {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum FsMode { OpenMedia, OpenProject, SaveProject, SaveExport, PickLut }
+pub enum FsMode { OpenMedia, OpenProject, SaveProject, SaveExport, PickLut, PickSrt }
 
 impl FsMode {
     pub fn filter(&self) -> Vec<&'static str> {
@@ -36,6 +36,7 @@ impl FsMode {
             FsMode::OpenProject | FsMode::SaveProject => vec!["kcproj"],
             FsMode::SaveExport => vec!["mp4"],
             FsMode::PickLut => vec!["cube"],
+            FsMode::PickSrt => vec!["srt"],
         }
     }
     pub fn title(&self) -> String {
@@ -45,6 +46,7 @@ impl FsMode {
             FsMode::SaveProject => crate::i18n::tr(K::SaveProject).to_string(),
             FsMode::SaveExport => crate::i18n::tr(K::OutputFile).to_string(),
             FsMode::PickLut => "LUT (.cube)".into(),
+            FsMode::PickSrt => "Subtitles (.srt)".into(),
         }
     }
 }
@@ -55,6 +57,10 @@ pub enum Drag {
     TrimL { id: u64 },
     TrimR { id: u64 },
     Slip { id: u64, grab_src: f64, grab_x: f32 },
+    /// Roll edit: move the cut point between two adjacent clips.
+    Roll { left_id: u64, right_id: u64 },
+    /// Slide edit: move clip between its neighbors (content unchanged).
+    Slide { id: u64, grab_t: f64, grab_x: f32 },
     Kf { clip: u64, idx: usize },
     HScroll { grab_t: f64, grab_x: f32 },
 }
@@ -100,6 +106,7 @@ pub struct ScopeImages {
     pub wave: Option<TextureHandle>,
     pub vector: Option<TextureHandle>,
     pub parade: Option<TextureHandle>,
+    pub hist: Option<TextureHandle>,
     pub stamp: Option<Instant>,
 }
 
@@ -127,17 +134,33 @@ pub struct App {
     pub tool: Tool,
     pub snap: bool,
     pub sel: Option<u64>,
+    /// Multi-selection (group edits, shift-click). Always contains `sel` when non-empty.
+    pub sel_multi: Vec<u64>,
+    /// Copy/paste clipboard (full clip snapshots).
+    pub clipboard: Vec<Clip>,
     pub zoom: f64,
     pub scroll_t: f64,
     pub drag: Option<Drag>,
     pub workspace: Workspace,
     pub scopes_visible: bool,
+    /// Title/action-safe overlay on the preview.
+    pub safe_margins: bool,
+    /// White-balance eyedropper armed — next click on the preview samples gray.
+    pub wb_pick: bool,
+    /// Timeline snap indicator line (x time) while dragging.
+    pub snap_line: Option<f64>,
+    /// Input modifiers cache (refreshed each frame; used by timeline tools).
+    pub mod_cache: Option<egui::Modifiers>,
 
     pub thumbs: HashMap<PathBuf, Option<TextureHandle>>,
     pub big_imgs: HashMap<PathBuf, TextureHandle>,
+    /// CPU-side RGBA copies for images (software blend compositor input).
+    pub big_imgs_cpu: HashMap<PathBuf, std::sync::Arc<Vec<u8>>>,
     pub waves: HashMap<PathBuf, std::sync::Arc<Vec<(i8, i8)>>>,
     pub tex_cache: std::collections::HashMap<u64, TextureHandle>,
-    pub title_tex: HashMap<u64, (String, TextureHandle)>,
+    pub title_tex: HashMap<u64, (String, TextureHandle, std::sync::Arc<Vec<u8>>)>,
+    /// Scratch RGBA canvas for the software blend compositor.
+    pub soft_canvas: (u32, u32, Vec<u8>),
     pub probe_meta: HashMap<PathBuf, MediaInfo>,
     pub scopes: ScopeImages,
 
@@ -194,12 +217,20 @@ impl App {
             tool: Tool::Select,
             snap: true,
             sel: None,
+            sel_multi: Vec::new(),
+            clipboard: Vec::new(),
             zoom: 110.0,
             scroll_t: 0.0,
             drag: None,
             workspace: Workspace::Edit,
             scopes_visible: true,
+            safe_margins: false,
+            wb_pick: false,
+            snap_line: None,
+            mod_cache: None,
             thumbs: HashMap::new(), big_imgs: HashMap::new(), waves: HashMap::new(),
+            big_imgs_cpu: HashMap::new(),
+            soft_canvas: (0, 0, Vec::new()),
             tex_cache: HashMap::new(), title_tex: HashMap::new(),
             probe_meta: HashMap::new(), scopes: ScopeImages::default(),
             dialog: None, toasts: Vec::new(),
@@ -299,7 +330,11 @@ impl App {
     }
 
     pub fn invalidate_preview(&mut self) {
-        self.preview_dirty = Some(Instant::now() + Duration::from_millis(200));
+        // coalesce: do NOT push the deadline forward on every mouse move —
+        // otherwise continuous drags would starve the preview refresh
+        if self.preview_dirty.is_none() {
+            self.preview_dirty = Some(Instant::now() + Duration::from_millis(180));
+        }
     }
 
     fn apply_preview_dirty(&mut self) {
@@ -391,6 +426,77 @@ impl App {
         for p in paths { self.ensure_wave(p); }
     }
 
+    fn _mod(&self, f: impl FnOnce(egui::Modifiers) -> bool) -> bool {
+        self.mod_cache.map(f).unwrap_or(false)
+    }
+
+    pub fn shift_down(&self) -> bool { self._mod(|m| m.shift) }
+    pub fn ctrl_down(&self) -> bool { self._mod(|m| m.ctrl || m.command) }
+    pub fn alt_down(&self) -> bool { self._mod(|m| m.alt) }
+
+    pub fn asset_kind_matches_track(&self, asset_id: u64, kind: TrackKind) -> bool {
+        let Some(a) = self.assets.iter().find(|a| a.id == asset_id) else { return false };
+        match kind {
+            TrackKind::Video => a.kind != crate::model::AssetKind::Audio,
+            TrackKind::Audio => a.kind == crate::model::AssetKind::Audio,
+        }
+    }
+    pub fn asset_kind_dur(&self, asset_id: u64) -> (crate::model::AssetKind, f64) {
+        self.assets.iter().find(|a| a.id == asset_id)
+            .map(|a| (a.kind, a.duration)).unwrap_or((crate::model::AssetKind::Video, 4.0))
+    }
+    pub fn asset_label(&self, asset_id: u64) -> String {
+        self.assets.iter().find(|a| a.id == asset_id).map(|a| a.label()).unwrap_or_default()
+    }
+
+    /// Place an asset at an explicit timeline time (drag&drop target).
+    pub fn add_asset_to_timeline_at(&mut self, asset_id: u64, at: f64) {
+        let saved = self.player.clock;
+        self.player.clock = at.max(0.0);
+        self.add_asset_to_timeline(asset_id);
+        self.player.clock = saved;
+    }
+
+    /// Commit a media-pool drop at `pt` onto the compatible track under it.
+    pub fn drop_media(&mut self, canvas: Rect, rows: &[(u64, TrackKind)], pt: Option<Pos2>, asset_id: u64, t0: f64, zoom: f32) {
+        let Some(pt) = pt else { return };
+        let (kind, _dur) = self.asset_kind_dur(asset_id);
+        let want_video = kind != crate::model::AssetKind::Audio;
+        let mut ry = canvas.top() + 22.0;
+        for (tid, tkind) in rows {
+            let h = match tkind { TrackKind::Video => self.track_h_video, TrackKind::Audio => self.track_h_audio };
+            if pt.y >= ry && pt.y < ry + h {
+                let ok = match tkind { TrackKind::Video => want_video, TrackKind::Audio => !want_video };
+                if ok {
+                    let t = t0 + ((pt.x - canvas.left()) / zoom).max(0.0) as f64;
+                    self.commit();
+                    self.add_asset_to_timeline_at(asset_id, t);
+                    self.toast(format!("✓ {}", self.asset_label(asset_id)), 1);
+                    let _ = tid;
+                }
+                return;
+            }
+            ry += h;
+        }
+    }
+
+    /// Adjustment layer on the topmost free video track at the playhead.
+    pub fn add_adjustment_at_playhead(&mut self) {
+        let t = self.player.clock;
+        let track = self.project.video_tracks().iter().rev()
+            .find(|tr| !tr.locked && tr.clips.iter().all(|c| t < c.tl_start || t >= c.end()))
+            .map(|tr| tr.id);
+        if let Some(tid) = track {
+            self.commit();
+            let c = crate::model::adjustment_clip(t, 4.0);
+            self.sel = Some(c.id);
+            self.project.place_clip(c, tid);
+            self.commit();
+            self.invalidate_preview();
+            self.toast("✓ Adjustment layer", 1);
+        }
+    }
+
     pub fn add_title_at_playhead(&mut self) {
         let t = self.player.clock;
         let track = self.project.video_tracks().iter().rev()
@@ -407,6 +513,359 @@ impl App {
     }
 
     // ------------------------------------------------------------ edit ops
+    /// Ids the current edit applies to: selection + group members.
+    pub fn edit_targets(&self) -> Vec<u64> {
+        let mut ids = self.sel_multi.clone();
+        if let Some(s) = self.sel {
+            if !ids.contains(&s) { ids.push(s); }
+            if let Some((_, c)) = self.project.clip(s) {
+                if let Some(g) = c.group {
+                    for m in self.project.group_members(g) {
+                        if !ids.contains(&m) { ids.push(m); }
+                    }
+                }
+            }
+        }
+        ids
+    }
+
+    pub fn copy_selection(&mut self) {
+        let ids = self.edit_targets();
+        self.clipboard = ids.iter().filter_map(|id| self.project.clip(*id).map(|(_, c)| c.clone())).collect();
+        if !self.clipboard.is_empty() {
+            self.toast(format!("✓ {} clip(s) copied", self.clipboard.len()), 1);
+        }
+    }
+
+    pub fn cut_selection(&mut self) {
+        self.copy_selection();
+        self.delete_selection(false);
+    }
+
+    pub fn paste_at_playhead(&mut self) {
+        if self.clipboard.is_empty() { return; }
+        self.commit();
+        let t0 = self.player.clock;
+        let min_start = self.clipboard.iter().map(|c| c.tl_start).fold(f64::INFINITY, f64::min);
+        for c in &self.clipboard {
+            let mut nc = c.clone();
+            nc.id = crate::model::next_id();
+            nc.group = None;
+            nc.link = None;
+            nc.tl_start = t0 + (c.tl_start - min_start);
+            nc.vol_kf = c.vol_kf.clone();
+            let kind = nc.kind;
+            let tid = self.project.tracks.iter()
+                .find(|tr| tr.kind == if kind == crate::model::ClipKind::Audio { TrackKind::Audio } else { TrackKind::Video })
+                .map(|tr| tr.id);
+            if let Some(tid) = tid {
+                self.project.place_clip(nc, tid);
+            }
+        }
+        self.commit();
+        self.invalidate_preview();
+        self.toast(format!("✓ {} clip(s) pasted", self.clipboard.len()), 1);
+    }
+
+    pub fn group_selection(&mut self) {
+        let ids = self.sel_multi.clone();
+        let mut all = ids.clone();
+        if let Some(s) = self.sel { if !all.contains(&s) { all.push(s); } }
+        if all.len() < 2 { self.toast("Select several clips to group (Shift+Click)", 0); return; }
+        self.commit();
+        let g = self.project.group_clips(&all);
+        self.toast(format!("✓ grouped {} clips", self.project.group_members(g).len()), 1);
+    }
+
+    pub fn ungroup_selection(&mut self) {
+        let ids = self.edit_targets();
+        if ids.is_empty() { return; }
+        self.commit();
+        self.project.ungroup_clips(&ids);
+        self.toast(self.t(K::MsgUngrouped), 1);
+    }
+
+    /// Freeze Frame: snapshot the composited frame at the playhead into an
+    /// Image clip placed right after the playhead (real PNG → real clip).
+    pub fn freeze_frame_at_playhead(&mut self) {
+        let Some((w, h, buf)) = self.player.last_frame_for_scopes.clone() else {
+            self.toast(self.t(K::MsgNoFrame), 2);
+            return;
+        };
+        let dir = self.project_dir.join("snapshots");
+        let _ = std::fs::create_dir_all(&dir);
+        let name = format!("freeze_{}.png", crate::util::timecode(self.player.clock, self.project.fps).replace(':', "-"));
+        let path = dir.join(&name);
+        if let Err(e) = exporter::save_frame_png(&buf, w, h, &path) {
+            self.toast(e, 2);
+            return;
+        }
+        let t = self.player.clock;
+        let track = self.project.video_tracks().iter().rev()
+            .find(|tr| !tr.locked && tr.clips.iter().all(|c| t < c.tl_start || t >= c.end()))
+            .map(|tr| tr.id);
+        if let Some(tid) = track {
+            self.commit();
+            let c = crate::model::still_clip(path, &format!("Freeze {}", name.trim_end_matches(".png").trim_start_matches("freeze_")), t, 2.0);
+            self.sel = Some(c.id);
+            self.project.place_clip(c, tid);
+            self.commit();
+            self.invalidate_preview();
+            self.toast(self.t(K::MsgFreeze), 1);
+        }
+    }
+
+    /// Toggle Reverse on the selected clip (+linked peer). Source must be
+    /// ≤ 60 s — the ffmpeg reverse filter buffers the segment in RAM.
+    pub fn toggle_reverse(&mut self) {
+        let Some(id) = self.sel else { return };
+        let (rev, len, name, peer) = match self.project.clip(id) {
+            Some((_, c)) => (c.reverse, c.src_len(), c.name.clone(), c.link),
+            None => return,
+        };
+        if !rev && len > 60.0 {
+            self.toast(format!("{} ({name}: {len:.0}s > 60s)", self.t(K::MsgRevTooLong)), 2);
+            return;
+        }
+        self.commit();
+        if let Some(c) = self.project.clip_mut(id) { c.reverse = !c.reverse; }
+        if let Some(p) = peer {
+            if let Some(c) = self.project.clip_mut(p) { c.reverse = !c.reverse; }
+        }
+        self.commit();
+        self.invalidate_preview();
+        self.toast(if !rev { "⏪ reverse ON" } else { "▶ reverse OFF" }, 1);
+    }
+
+    /// Auto-Duck: dip the volume of every OTHER audio clip overlapping the
+    /// selected (voice) clip wherever the voice waveform is loud.
+    pub fn auto_duck_under_selection(&mut self) {
+        let Some(vid) = self.sel else { return };
+        let Some((vtr, vc)) = self.project.clip(vid) else { return };
+        if !vc.is_audio() { self.toast(self.t(K::MsgDuckNeedVoice), 0); return; }
+        let (vtr_id, vc) = (vtr.id, vc.clone());
+        let Some(peaks) = vc.source.as_ref().and_then(|p| self.waves.get(p)).cloned() else {
+            self.toast(self.t(K::MsgNoWave), 2);
+            return;
+        };
+        if peaks.is_empty() { self.toast(self.t(K::MsgNoWave), 2); return; }
+        const PEAK_RATE: f64 = 50.0;
+        let mut regions: Vec<(f64, f64)> = Vec::new();
+        let mut open: Option<f64> = None;
+        let win = (vc.src_dur * PEAK_RATE) as usize;
+        for i in 0..win {
+            let src_i = ((vc.src_in + i as f64 / PEAK_RATE) * PEAK_RATE) as usize;
+            let loud = peaks.get(src_i).map(|&(mn, mx)| mx.max(-mn) > 45).unwrap_or(false);
+            let tl = vc.tl_start + i as f64 / PEAK_RATE;
+            if loud && open.is_none() { open = Some(tl); }
+            if !loud {
+                if let Some(o) = open.take() {
+                    if tl - o > 0.15 { regions.push((o, tl)); }
+                }
+            }
+        }
+        if let Some(o) = open.take() { regions.push((o, vc.end())); }
+        if regions.is_empty() { self.toast(self.t(K::MsgDuckQuiet), 0); return; }
+        self.commit();
+        let mut dipped = 0;
+        let others: Vec<crate::model::Clip> = self.project.tracks.iter()
+            .filter(|tr| tr.kind == TrackKind::Audio && tr.id != vtr_id)
+            .flat_map(|tr| tr.clips.iter().filter(|c| c.tl_start < vc.end() && c.end() > vc.tl_start).cloned())
+            .collect();
+        for c in others {
+            let mut kfs: Vec<(f64, f32)> = Vec::new();
+            for (a, b) in &regions {
+                let (a, b) = (*a - c.tl_start, *b - c.tl_start);
+                let (a, b) = (a.max(0.02), b.min(c.src_dur - 0.02));
+                if b <= a { continue; }
+                kfs.push((a - 0.1, 1.0));
+                kfs.push((a + 0.12, 0.28));
+                kfs.push((b - 0.12, 0.28));
+                kfs.push((b + 0.1, 1.0));
+            }
+            if kfs.is_empty() { continue; }
+            dipped += 1;
+            if let Some(cc) = self.project.clip_mut(c.id) {
+                cc.vol_kf = kfs;
+            }
+        }
+        self.commit();
+        self.toast(format!("✓ ducked {dipped} clip(s) under voice"), 1);
+    }
+
+    /// Beat detection (approximate, energy-onset based) → timeline markers.
+    pub fn detect_beats(&mut self) {
+        let Some(id) = self.sel else { self.toast(self.t(K::MsgPickAudio), 0); return; };
+        let Some((_, c)) = self.project.clip(id) else { return };
+        if !c.is_audio() { self.toast(self.t(K::MsgPickAudio), 0); return; }
+        let Some(peaks) = c.source.as_ref().and_then(|p| self.waves.get(p)).cloned() else { return };
+        if peaks.is_empty() { self.toast(self.t(K::MsgNoWave), 2); return; }
+        const PEAK_RATE: f64 = 50.0;
+        let start_i = (c.src_in * PEAK_RATE) as usize;
+        let count = (c.src_len() * PEAK_RATE) as usize;
+        let mut marks: Vec<f64> = Vec::new();
+        let mut run_avg = 10.0f32;
+        let mut last_t = -1.0f64;
+        for i in 0..count {
+            let e = peaks.get(start_i + i).map(|&(mn, mx)| mx.max(-mn) as f32).unwrap_or(0.0);
+            let t_src = i as f64 / PEAK_RATE;
+            let t_tl = c.tl_start + if c.reverse { c.src_len() - t_src } else { t_src } / c.speed as f64;
+            if e > run_avg * 1.55 && e > 40.0 && t_tl - last_t > 0.22 {
+                marks.push(t_tl);
+                last_t = t_tl;
+            }
+            run_avg = run_avg * 0.96 + e * 0.04;
+        }
+        marks.truncate(300);
+        let n = marks.len();
+        if n == 0 { self.toast(self.t(K::MsgNoBeats), 0); return; }
+        self.commit();
+        for m in marks { self.project.markers.push((m, "♪".into())); }
+        self.commit();
+        self.toast(format!("✓ {} beats → markers", n), 1);
+    }
+
+    /// Import an .srt subtitle file as Title clips on the top video track.
+    pub fn import_srt(&mut self, path: PathBuf) {
+        match crate::subs::parse_srt_file(&path) {
+            Ok(cues) if !cues.is_empty() => {
+                self.commit();
+                let track = self.project.video_tracks().last().map(|t| t.id);
+                if let Some(tid) = track {
+                    for (a, b, text) in &cues {
+                        let mut c = crate::model::title_clip(text, *a, (b - a).max(0.3));
+                        if let Some(td) = c.title.as_mut() {
+                            *td = crate::model::TitleData::preset(3, text);
+                        }
+                        c.name = format!("SUB {}", text.chars().take(14).collect::<String>());
+                        self.project.place_clip(c, tid);
+                    }
+                    self.commit();
+                    self.invalidate_preview();
+                    self.toast(format!("✓ {} subtitles imported", cues.len()), 1);
+                }
+            }
+            Ok(_) => self.toast("empty SRT", 2),
+            Err(e) => self.toast(format!("srt: {e}"), 2),
+        }
+    }
+
+    /// Set/replace the transition INTO the selected clip (clamped to the
+    /// available source room on the left clip).
+    pub fn set_transition_on_selection(&mut self, kind: crate::model::TransKind, dur: f64) {
+        let Some(id) = self.sel else { return };
+        let (left, room) = {
+            let (lid, _) = self.project.neighbors(id);
+            let room = lid.and_then(|l| self.project.clip(l).and_then(|(_, lc)| {
+                match lc.source.clone() {
+                    Some(p) => self.assets.iter().find(|a| a.path == p)
+                        .map(|a| ((a.duration - lc.src_end()) / lc.speed as f64).max(0.0)),
+                    None => Some(f64::INFINITY),
+                }
+            })).unwrap_or(0.0);
+            (lid, room)
+        };
+        if left.is_none() { self.toast("no previous clip on this track", 0); return; }
+        let clip_dur = self.project.clip(id).map(|(_, c)| c.src_dur).unwrap_or(0.0);
+        let d = dur.clamp(0.1, room.min(clip_dur - 0.1).min(4.0).max(0.1));
+        self.commit();
+        if let Some(c) = self.project.clip_mut(id) {
+            c.trans_in = Some(crate::model::Transition { kind, dur: d });
+        }
+        self.commit();
+        self.invalidate_preview();
+        self.toast(format!("✓ {} {d:.2}s", self.t(K::AddTransition)), 1);
+    }
+
+    pub fn remove_transition(&mut self) {
+        let Some(id) = self.sel else { return };
+        self.commit();
+        if let Some(c) = self.project.clip_mut(id) { c.trans_in = None; }
+        self.commit();
+        self.invalidate_preview();
+    }
+
+    pub fn selection_transition(&self) -> Option<crate::model::Transition> {
+        self.sel.and_then(|id| self.project.clip(id)).and_then(|(_, c)| c.trans_in)
+    }
+
+    /// White-balance: sample a neutral gray point from the composited frame.
+    pub fn wb_pick_at(&mut self, u: f32, v: f32) {
+        let Some((w, h, buf)) = self.player.last_frame_for_scopes.clone() else { return };
+        let x = ((u * w as f32) as usize).min(w as usize - 1);
+        let y = ((v * h as f32) as usize).min(h as usize - 1);
+        let mut r = 0u32; let mut g = 0u32; let mut b = 0u32; let mut n = 0;
+        for dy in -2i32..=2 {
+            for dx in -2i32..=2 {
+                let xx = x as i32 + dx; let yy = y as i32 + dy;
+                if xx < 0 || yy < 0 || xx >= w as i32 || yy >= h as i32 { continue; }
+                let j = ((yy * w as i32 + xx) * 4) as usize;
+                if j + 2 < buf.len() { r += buf[j] as u32; g += buf[j + 1] as u32; b += buf[j + 2] as u32; n += 1; }
+            }
+        }
+        if n == 0 { return; }
+        let (r, g, b) = (r as f32 / n as f32, g as f32 / n as f32, b as f32 / n as f32);
+        let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        let temp = ((r - lum) / 255.0 * 300.0 - (b - lum) / 255.0 * 900.0).clamp(-100.0, 100.0);
+        let tint = (-(g - lum) / 255.0 * 500.0).clamp(-100.0, 100.0);
+        self.set_grade_of_selection(|gr| { gr.temp = temp; gr.tint = tint; });
+        self.toast(format!("{}  temp {temp:+.0}  tint {tint:+.0}", self.t(K::WhiteBalance)), 1);
+    }
+
+    /// Two-pass vidstab stabilization into a stabilized intermediate.
+    pub fn stabilize_selected(&mut self) {
+        let Some(id) = self.sel else { return };
+        let Some((_, c)) = self.project.clip(id) else { return };
+        let Some(src) = c.source.clone() else { return };
+        if !media::has_stabilizer() {
+            self.toast(self.t(K::StabUnavailable), 2);
+            return;
+        }
+        let dest = self.project_dir.join("proxies")
+            .join(format!("{}_stab.mp4", src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()));
+        let job = crate::model::next_id();
+        self.proxy_jobs.insert(job, self.assets.iter().find(|a| a.path == src).map(|a| a.id).unwrap_or(0));
+        media::spawn_stabilize(job, src.clone(), dest, self.ev_tx.clone());
+        self.toast("Stabilizing… (vidstab two-pass)", 0);
+    }
+
+    // ---- keyframe helpers ------------------------------------------------
+    /// Add a keyframe on `chan` for the selected clip at the playhead.
+    pub fn add_keyframe(&mut self, chan: u8) {
+        let Some(id) = self.sel else { return };
+        let Some((_, c)) = self.project.clip(id) else { return };
+        let rel = (self.player.clock - c.tl_start).max(0.0).min(c.src_dur);
+        let base = c.transform;
+        let v = match chan {
+            0 => base.x, 1 => base.y, 2 => base.scale, 3 => base.rotation, _ => base.opacity,
+        };
+        self.commit();
+        if let Some(c) = self.project.clip_mut(id) {
+            let ch: &mut Vec<(f64, f32, crate::model::Ease)> = match chan {
+                0 => &mut c.anim.pos_x, 1 => &mut c.anim.pos_y, 2 => &mut c.anim.scale,
+                3 => &mut c.anim.rotation, _ => &mut c.anim.opacity,
+            };
+            ch.retain(|(t, _, _)| (t - rel).abs() > 0.02);
+            ch.push((rel, v, crate::model::Ease::Linear));
+            ch.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        self.commit();
+        self.invalidate_preview();
+    }
+
+    pub fn clear_keyframes(&mut self, chan: u8) {
+        let Some(id) = self.sel else { return };
+        self.commit();
+        if let Some(c) = self.project.clip_mut(id) {
+            match chan {
+                0 => c.anim.pos_x.clear(), 1 => c.anim.pos_y.clear(), 2 => c.anim.scale.clear(),
+                3 => c.anim.rotation.clear(), _ => c.anim.opacity.clear(),
+            }
+        }
+        self.commit();
+        self.invalidate_preview();
+    }
+
     pub fn split_at_playhead(&mut self) {
         let t = self.player.clock;
         let ids: Vec<u64> = self.project.tracks.iter()
@@ -422,13 +881,17 @@ impl App {
     }
 
     pub fn delete_selection(&mut self, ripple: bool) {
-        if let Some(id) = self.sel {
-            self.commit();
-            self.project.delete_clip(id, ripple);
-            self.sel = None;
-            self.commit();
-            self.invalidate_preview();
+        let ids = self.edit_targets();
+        if ids.is_empty() { return; }
+        self.commit();
+        let first = ids[0];
+        for id in ids {
+            self.project.delete_clip(id, ripple && id == first);
         }
+        self.sel = None;
+        self.sel_multi.clear();
+        self.commit();
+        self.invalidate_preview();
     }
 
     pub fn nudge_selection(&mut self, frames: f64) {
@@ -555,33 +1018,43 @@ impl App {
     }
 
     // ------------------------------------------------------------ player
-    /// Playback engine state machine.
+    /// Playback engine (v0.3 streaming design).
     ///
-    /// - Paused  → one `Still` decoder per active video track grabs a single
-    ///   frame at the current position (fast seek); the previous frame stays
-    ///   visible until the fresh one arrives, so scrubbing never goes black.
-    /// - Playing → one `Run` decoder per active video track streams frames
-    ///   paced at (fps × clip-speed × playback-speed); drift vs the playback
-    ///   clock triggers a reseek only when it exceeds 0.6 s. Decoders are NOT
-    ///   restarted per frame — that was the cause of the old black preview.
-    /// - Decode failures are captured and surfaced in the preview overlay.
+    /// Every active clip owns ONE streaming decoder for its whole lifetime —
+    /// there is no Still/Run mode switching and no per-bucket restarts:
+    ///   • Pacing comes from backpressure: the decoder thread blocks on the
+    ///     bounded (4-frame) channel whenever the UI stops draining.
+    ///   • Playing: the wall clock advances the target position; each tick
+    ///     drains frames up to the target (a few per tick).
+    ///   • Scrubbing/paused: same path — forward seeks drain (skip) frames
+    ///     at decode speed; the shown frame never goes black.
+    ///   • Backward seeks past 0.7 s (and clip/filter changes) restart the
+    ///     process at the new position — the previous frame stays visible
+    ///     until the fresh one arrives.
+    ///   • Reverse clips: one-frame grabs per (throttled) frame bucket.
+    ///   • Transition windows decode BOTH the outgoing and incoming clip.
+    /// Decode failures surface in the preview overlay instead of blackness.
     pub fn update_player(&mut self, _ctx: &egui::Context) {
         let fps = self.project.fps;
-        let q = self.player.quality.unwrap_or(Quality::Half);
-        let playing = self.player.playing;
-        let mode = if playing { DecodeMode::Run } else { DecodeMode::Still };
+        // per-pixel filters (geq masks, glow…) cost ~10× in the decoder —
+        // drop preview quality automatically so scrubbing stays responsive
+        let heavy = self.project.tracks.iter().flat_map(|t| &t.clips).any(|c|
+            (c.fx.mask.is_active() || c.fx.glow > 0.5 || c.fx.denoise > 50.0)
+            && self.player.clock >= c.tl_start && self.player.clock < c.end());
+        let base_q = self.player.quality.unwrap_or(Quality::Half);
+        let q = if heavy { Quality::Quarter } else { base_q };
         let gen = self.player.seek_gen;
-        let speed = self.player.speed as f64;
+        let playing = self.player.playing;
         if let Some(ts) = self.preview_dirty {
             if Instant::now() >= ts { self.preview_dirty = None; self.apply_preview_dirty(); }
         }
 
         struct Want {
-            track: u64,
             clip_id: u64,
             key: u64,
-            src_in: f64,
-            req: Option<DecoderReq>,
+            src_t: f64,
+            req: Option<crate::decoder::DecoderReq>,
+            reverse: bool,
         }
         let mut wants: Vec<Want> = Vec::new();
         let t = self.player.clock;
@@ -592,108 +1065,160 @@ impl App {
         if pw > 1280.0 { pw = 1280.0; ph = pw / aspect; }
         let (pw, ph) = ((pw as u32) & !1, (ph as u32) & !1);
 
+        // ---- collect active clips (video tracks, bottom-up storage order) --
         for tr in self.project.tracks.iter().filter(|tr| tr.kind == TrackKind::Video && !tr.hidden) {
             let Some(c) = tr.clips.iter().find(|c| t >= c.tl_start && t < c.end()) else { continue };
             if c.kind != crate::model::ClipKind::Video { continue; }
-            let rel = (t - c.tl_start) * c.speed as f64;
-            let src_t = c.src_in + rel;
+            let src_t = c.src_t_at(t);
             let src_path = c.source.clone().unwrap_or_default();
             let filters = media::video_filter_chain(&c.grade, &c.fx, c.src_dur, Some(pw), Some(ph), Some(fps));
-            let key = hash_key(&[c.id, fnv(&filters), q as u64, mode as u64]);
-            // pacing rate: frames per wall-second — project fps scaled by clip
-            // speed (source consumed faster/slower) and playback speed
-            let rate = (fps * (c.speed as f64).max(0.01) * speed).max(1.0);
+            let stream_rate = (fps * (c.speed as f64).max(0.01)).max(1.0);
+            let reverse = c.reverse;
+            let key = hash_key(&[c.id, fnv(&filters), q as u64]);
             wants.push(Want {
-                track: tr.id, clip_id: c.id, key, src_in: src_t,
-                req: Some(DecoderReq { path: src_path, src_in: src_t, filters, w: pw, h: ph, fps: rate, mode }),
+                clip_id: c.id, key, src_t, reverse,
+                req: Some(crate::decoder::DecoderReq {
+                    path: src_path, src_in: src_t.max(0.0), filters, w: pw, h: ph,
+                    fps: stream_rate, mode: if reverse { crate::decoder::DecodeMode::Still } else { crate::decoder::DecodeMode::Stream },
+                }),
             });
+            // ---- transition window: also decode the OUTGOING left clip ----
+            if let (Some(trans), Some(left_id)) = (c.trans_in, self.project.seam_for(c.id)) {
+                let tw0 = c.tl_start;
+                let tw1 = c.tl_start + trans.dur.min(c.src_dur);
+                if t >= tw0 && t < tw1 {
+                    if let Some((_, l)) = self.project.clip(left_id) {
+                        if l.is_visual() && l.kind == crate::model::ClipKind::Video {
+                            // left keeps playing past its cut (needs source room)
+                            let rel = t - tw0;
+                            let l_src_t = l.src_end() + rel * l.speed as f64;
+                            let l_filters = media::video_filter_chain(&l.grade, &l.fx, l.src_dur, Some(pw), Some(ph), Some(fps));
+                            let l_key = hash_key(&[l.id, fnv(&l_filters), q as u64]);
+                            wants.push(Want {
+                                clip_id: l.id, key: l_key, src_t: l_src_t, reverse: false,
+                                req: Some(crate::decoder::DecoderReq {
+                                    path: l.source.clone().unwrap_or_default(), src_in: l_src_t.max(0.0),
+                                    filters: l_filters, w: pw, h: ph,
+                                    fps: (fps * (l.speed as f64).max(0.01)).max(1.0),
+                                    mode: crate::decoder::DecodeMode::Stream,
+                                }),
+                            });
+                        }
+                    }
+                }
+            }
         }
 
-        let want_tracks: Vec<u64> = wants.iter().map(|w| w.track).collect();
+        let want_clips: Vec<u64> = wants.iter().map(|w| w.clip_id).collect();
         // Freeze at the end: paused at/after the sequence end with no active
-        // clip, real NLEs hold the last decoded frame instead of going black.
+        // clip — hold the last decoded frame instead of going black.
         let at_end = t >= self.project.duration() - 1e-6;
-        let freeze_end = !playing && at_end && want_tracks.is_empty() && !self.player.slots.is_empty();
+        let freeze_end = !playing && at_end && want_clips.is_empty() && !self.player.slots.is_empty();
         if !freeze_end {
-            self.player.slots.retain(|s| want_tracks.contains(&s.track_id));
-            for w in wants {
-            if let Some(slot) = self.player.slots.iter_mut().find(|s| s.track_id == w.track) {
-                let clip_changed = slot.clip_id != w.clip_id;
-                let key_changed = slot.key != w.key;
-                let seeked = slot.seek_gen != gen;
-                let mut need_restart = key_changed || seeked;
-                if !need_restart {
-                    if playing {
-                        // Playback is decode-limited best-effort (like dropped
-                        // frames in real NLEs): a heavy filter chain may lag
-                        // the wall clock, which must NOT trigger restarts.
-                        // Restart only on a genuine stall (no frames from the
-                        // current decoder) or a huge seek-induced drift.
-                        let stalled = match slot.last_frame_at {
-                            Some(lf) => lf.elapsed() > Duration::from_secs(2),
-                            None => slot.started_at.elapsed() > Duration::from_secs(4),
+            self.player.slots.retain(|s| want_clips.contains(&s.clip_id));
+
+            for w in &wants {
+                let existing = self.player.slots.iter().find(|s| s.clip_id == w.clip_id);
+                let mut need_restart = match existing {
+                    None => true,
+                    Some(s) => s.key != w.key,
+                };
+                // reverse clips: regrab on (throttled) bucket change
+                if !need_restart && w.reverse {
+                    if let Some(s) = existing {
+                        need_restart = s.rev_bucket != bucket_now / 3 || (!s.frame_current && s.eof);
+                    }
+                }
+                // stream slots: restart only on backward jumps / stalls
+                if !need_restart && !w.reverse {
+                    if let Some(s) = existing {
+                        let backward = match (s.dec.as_ref().and_then(|d| d.head_pts()), s.frame.as_ref()) {
+                            // compare against the position we actually display
+                            (_, Some(f)) => {
+                                let shown_src = s.dec_origin + f.pts;
+                                w.src_t < shown_src - 0.7
+                            }
+                            _ => false,
                         };
-                        let big_drift = slot.frame_current && slot.eof != true
-                            && slot.frame.as_ref()
-                                .map(|f| (t - slot.origin_clock - f.pts * speed).abs() > 3.0)
-                                .unwrap_or(false);
-                        if (stalled && !slot.eof) || big_drift { need_restart = true; }
-                    } else if slot.still_bucket != bucket_now {
-                        need_restart = true;
+                        let stalled = playing && !s.eof && match s.last_frame_at {
+                            Some(lf) => lf.elapsed() > Duration::from_secs(2),
+                            None => s.started_at.elapsed() > Duration::from_secs(4),
+                        };
+                        need_restart = backward || stalled;
                     }
                 }
                 if need_restart {
-                    if std::env::var("KC_TRACE").is_ok() {
-                        eprintln!("[trace] restart track={} clip={} reason={}{}{} clk={t:.3} src_in={:.3} key={:x}→{:x} gen {}→{}",
-                            w.track, w.clip_id,
-                            if key_changed { "KEY " } else { "" },
-                            if seeked { "SEEK " } else { "" },
-                            if !key_changed && !seeked { "DRIFT" } else { "" },
-                            w.src_in, slot.key, w.key, slot.seek_gen, gen);
-                    }
-                    match w.req.clone().map(Decoder::start) {
+                    // fresh decoder starts 0.2 s before the target so the
+                    // drain always has a frame at/before the wanted position
+                    let start_at = (w.src_t - 0.2).max(0.0);
+                    match w.req.clone().map(|mut r| { r.src_in = start_at; crate::decoder::Decoder::start(r) }) {
                         Some(Ok(d)) => {
-                            slot.dec = Some(d);
-                            slot.decode_error = None;
-                            if clip_changed { slot.frame = None; } // new content
+                            let slot = self.player.slots.iter_mut().find(|s| s.clip_id == w.clip_id);
+                            match slot {
+                                Some(s) => {
+                                    s.dec = Some(d);
+                                    s.decode_error = None;
+                                    s.key = w.key;
+                                    s.dec_origin = start_at;
+                                    s.eof = false;
+                                    s.frame_current = false; // old frame is from the old gen
+                                    s.last_frame_at = None;
+                                    s.started_at = Instant::now();
+                                    s.rev_bucket = bucket_now / 3;
+                                }
+                                None => {
+                                    self.player.slots.push(crate::player::Slot {
+                                        clip_id: w.clip_id, key: w.key, dec: Some(d), frame: None,
+                                        dec_origin: start_at, eof: false, decode_error: None,
+                                        frame_current: false, last_frame_at: None,
+                                        started_at: Instant::now(), rev_bucket: bucket_now / 3,
+                                    });
+                                }
+                            }
                         }
-                        Some(Err(e)) => { slot.dec = None; slot.decode_error = Some(e); }
-                        None => { slot.dec = None; }
+                        Some(Err(e)) => {
+                            let slot = self.player.slots.iter_mut().find(|s| s.clip_id == w.clip_id);
+                            match slot {
+                                Some(s) => { s.dec = None; s.decode_error = Some(e); s.key = w.key; s.dec_origin = start_at; }
+                                None => {
+                                    self.player.slots.push(crate::player::Slot {
+                                        clip_id: w.clip_id, key: w.key, dec: None, frame: None,
+                                        dec_origin: start_at, eof: true, decode_error: Some(e),
+                                        frame_current: false, last_frame_at: None,
+                                        started_at: Instant::now(), rev_bucket: bucket_now / 3,
+                                    });
+                                }
+                            }
+                        }
+                        None => {}
                     }
-                    slot.clip_id = w.clip_id;
-                    slot.key = w.key;
-                    slot.eof = false;
-                    slot.origin_clock = t;
-                    slot.seek_gen = gen;
-                    slot.still_bucket = bucket_now;
-                    slot.frame_current = false; // carried frame is from the old gen
-                    slot.last_frame_at = None;
-                    slot.started_at = Instant::now();
+                    if std::env::var("KC_TRACE").is_ok() {
+                        eprintln!("[trace] decoder start clip={} src_t={:.3} reverse={} key={:x} gen={}",
+                            w.clip_id, w.src_t, w.reverse, w.key, gen);
+                    }
                 }
-            } else {
-                let (dec, err) = match w.req.clone().map(Decoder::start) {
-                    Some(Ok(d)) => (Some(d), None),
-                    Some(Err(e)) => (None, Some(e)),
-                    None => (None, None),
-                };
-                self.player.slots.push(Slot {
-                    track_id: w.track, clip_id: w.clip_id, key: w.key, dec, frame: None, eof: false,
-                    origin_clock: t, seek_gen: gen, still_bucket: bucket_now, decode_error: err,
-                    frame_current: false, last_frame_at: None, started_at: Instant::now(),
-                });
-            }
             }
         } // !freeze_end
 
+        // ---- drain every live decoder toward the wanted positions --------
         for s in self.player.slots.iter_mut() {
-            if let Some(dec) = s.dec.as_mut() {
-                if let Some(f) = dec.poll() {
-                    s.frame = Some(f); s.frame_current = true; s.decode_error = None;
-                    s.last_frame_at = Some(Instant::now());
+            let want_src = wants.iter().find(|w| w.clip_id == s.clip_id).map(|w| w.src_t);
+            let Some(dec) = s.dec.as_mut() else { continue };
+            let until = want_src.map(|st| (st - s.dec_origin).max(0.0));
+            let before_head = dec.head_pts();
+            if let Some(f) = dec.poll(until.filter(|_| !s.eof || true)) {
+                let is_new = before_head.map(|h| f.pts > h).unwrap_or(true);
+                if is_new || !s.frame_current {
+                    s.frame = Some(f);
+                    s.frame_current = true;
+                    s.decode_error = None;
+                    if is_new { s.last_frame_at = Some(Instant::now()); }
                 }
-                if let Some(e) = &dec.last_error { s.decode_error = Some(e.clone()); }
-                if dec.is_eof() { s.eof = true; }
             }
+            if let Some(e) = &dec.last_error { s.decode_error = Some(e.clone()); }
+            if dec.is_eof() { s.eof = true; }
+            // playing past EOF: hold the last frame (no restart churn)
+            let _ = want_src;
         }
         if self.player.slots.iter().any(|s| s.frame.is_some()) {
             self.player.ever_had_frame = true;
@@ -717,20 +1242,22 @@ impl App {
         }
         let t = self.player.clock;
         let any_solo = self.project.audio_tracks().iter().any(|tr| tr.solo);
-        let mut chosen: Option<(u64, PathBuf, f64, f64)> = None;
+        let mut chosen: Option<(u64, PathBuf, f64, f64, String)> = None;
         for tr in self.project.audio_tracks() {
             if tr.mute || (any_solo && !tr.solo) { continue; }
             if let Some(c) = tr.clips.iter().find(|c| t >= c.tl_start && t < c.end()) {
                 if let Some(src) = c.source.clone() {
                     let src_in = c.src_in + (t - c.tl_start) * c.speed as f64;
                     let dur = (c.end() - t) * c.speed as f64;
-                    chosen = Some((c.id, src, src_in, dur));
+                    // per-clip processing chain — identical to the export mix
+                    let chain = media::audio_filter_chain(&c.afx, c.gain_db, c.fx.fade_in, c.fx.fade_out, c.src_dur);
+                    chosen = Some((c.id, src, src_in, dur, chain));
                 }
             }
         }
         match chosen {
-            Some((cid, src, src_in, dur)) if self.player.audio_clip != Some(cid) => {
-                self.player.audio = crate::decoder::audio::Monitor::start(src, src_in, dur.max(0.2));
+            Some((cid, src, src_in, dur, chain)) if self.player.audio_clip != Some(cid) => {
+                self.player.audio = crate::decoder::audio::Monitor::start(src, src_in, dur.max(0.2), &chain);
                 if self.player.audio.is_some() {
                     self.player.audio_clip = Some(cid);
                 } else if !self.audio_warned {
@@ -860,6 +1387,17 @@ impl App {
             else if i.key_pressed(Key::Minus) && m.ctrl { act = Some(23); }
             else if i.key_pressed(Key::E) && m.ctrl { act = Some(24); }
             else if i.key_pressed(Key::Escape) { act = Some(25); }
+            else if i.key_pressed(Key::C) && m.ctrl { act = Some(26); }
+            else if i.key_pressed(Key::X) && m.ctrl { act = Some(27); }
+            else if i.key_pressed(Key::V) && m.ctrl { act = Some(28); }
+            else if i.key_pressed(Key::G) && m.ctrl && !m.shift { act = Some(29); }
+            else if i.key_pressed(Key::G) && m.ctrl && m.shift { act = Some(30); }
+            else if i.key_pressed(Key::M) && !m.ctrl { act = Some(31); }
+            else if i.key_pressed(Key::F) && !m.ctrl { act = Some(32); }
+            else if i.key_pressed(Key::R) && !m.ctrl { act = Some(33); }
+            else if i.key_pressed(Key::S) && m.ctrl { act = Some(34); }
+            else if i.key_pressed(Key::J) && !m.ctrl { act = Some(35); }
+            else if i.key_pressed(Key::U) && !m.ctrl { act = Some(36); }
         });
         match act {
             Some(1) => self.toggle_play(),
@@ -886,7 +1424,18 @@ impl App {
             Some(22) => self.zoom = (self.zoom * 1.25).min(4000.0),
             Some(23) => self.zoom = (self.zoom / 1.25).max(4.0),
             Some(24) => { self.export_state.open = true; }
-            Some(25) => { self.sel = None; }
+            Some(25) => { self.sel = None; self.sel_multi.clear(); }
+            Some(26) => self.copy_selection(),
+            Some(27) => self.cut_selection(),
+            Some(28) => self.paste_at_playhead(),
+            Some(29) => self.group_selection(),
+            Some(30) => self.ungroup_selection(),
+            Some(31) => { self.project.add_marker(self.player.clock); self.commit(); }
+            Some(32) => self.freeze_frame_at_playhead(),
+            Some(33) => self.toggle_reverse(),
+            Some(34) => self.save_project(self.project_dir.join(format!("{}.kcproj", self.project.name))),
+            Some(35) => self.tool = Tool::Slide,
+            Some(36) => self.tool = Tool::Roll,
             _ => {}
         }
     }

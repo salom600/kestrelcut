@@ -173,6 +173,11 @@ fn grid(app: &mut App, ui: &mut egui::Ui) {
                     }
                     if resp.double_clicked() { add_req = Some(*id); }
                     if resp.clicked() { app.sel = None; }
+                    // drag → timeline drag&drop (ghost + snap handled by the timeline)
+                    if resp.dragged() {
+                        egui::DragAndDrop::set_payload(ui.ctx(), *id);
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    }
                     resp.context_menu(|ui| {
                         if ui.button(app.t(K::ClsTimeline)).clicked() { add_req = Some(*id); ui.close_menu(); }
                         if ui.button(app.t(K::CreateProxy)).clicked() { proxy_req = Some(*id); ui.close_menu(); }
@@ -263,6 +268,10 @@ fn list_view(app: &mut App, ui: &mut egui::Ui) {
                     "PROXY", FontId::proportional(7.5), Color32::BLACK);
             }
             if resp.double_clicked() { add_req = Some(id); }
+            if resp.dragged() {
+                egui::DragAndDrop::set_payload(ui.ctx(), id);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
             resp.context_menu(|ui| {
                 if ui.button(app.t(K::ClsTimeline)).clicked() { add_req = Some(id); ui.close_menu(); }
                 if ui.button(app.t(K::CreateProxy)).clicked() { proxy_req = Some(id); ui.close_menu(); }

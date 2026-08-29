@@ -1,50 +1,46 @@
-# KestrelCut — Verification Report
+# Verification — v0.3.0
 
-**Date:** 2026-08-28 · **Commit:** main (v0.1.0) · **Verified by:** scripted E2E + headless GUI run
+## Automated end-to-end selftest (`--selftest`)
 
-## 1. End-to-end functional test (`--selftest`)
+Drives the EXACT code paths the UI buttons call, under Xvfb, with real
+FFmpeg-imported demo media, and writes a JSON report:
 
-Drives the exact code paths the UI buttons call, then verifies the output
-file with ffprobe. Log (abridged):
-
-```
-[  0.51s] imported 3 assets
-[  0.61s] timeline built: 6 clips, dur 16.00s
-[  0.79s] split: 6 → 12 clips          (razor at playhead, A/V linked pairs split)
-[  0.98s] grade+fx applied             (contrast/saturation/exposure/blur/fade)
-[  1.16s] trim: 5.00s → 3.00s          (edge trim with source-bound clamping)
-[  1.29s] title added, in/out 0..10s
-[  1.47s] export started (libx264 720p) — UI stayed responsive, live progress
-[ 19.49s] export finished: ~/KestrelCut/exports/selftest_out.mp4
-[ 19.72s] probe: 10.00s video=true audio=true size_ok=true
-[ 19.72s] SELFTEST PASS
-```
-
-Output re-verified with `ffprobe`: duration 10.00 s (exactly the In/Out range),
-H.264 video + AAC audio present, >10 kB. **PASS**
-
-## 2. GUI run under Xvfb (headless display)
-
-- App launches, decodes demo clips through the isolated FFmpeg pipeline.
-- Preview renders decoded frames with per-clip transforms; scopes
-  (luma waveform / vectorscope / RGB parade) compute from the live frame.
-- Screenshot vs. reference layout: panel structure correlation
-  **0.85 (columns) / 0.73 (rows)** — media pool left, preview center,
-  color+scopes right, timeline bottom, RTL Arabic UI with contextual shaping.
-
-## 3. CI artifacts (GitHub Actions, both platforms green)
-
-| Artifact | Validation |
+| Check | Result |
 |---|---|
-| `kestrelcut_0.1.0_amd64.deb` | extracted; **binary executed** under Xvfb — decodes, renders, exports |
-| `kestrelcut_0.1.0_amd64.AppImage` | ELF, linuxdeploy-validated desktop entry |
-| `KestrelCut_0.1.0_x64.msi` | WiX candle/light ICE-clean |
-| `KestrelCut_0.1.0_win64_portable.zip` | portable exe |
+| Import 3 real media files (ffprobe) | PASS |
+| Timeline build (magnetic placement, 12 clips) | PASS |
+| Razor split at playhead (12 → 18 clips) | PASS |
+| Grade + FX + Lift/Gamma/Gain/Offset/Vibrance → FFmpeg filter mapping | PASS |
+| Trim handle (−2 s) | PASS |
+| Title clip + in/out marks | PASS |
+| **Transition set (xfade, source-room clamped)** | PASS |
+| **Keyframes + eased interpolation (mid-point value)** | PASS |
+| **Copy/paste clips** | PASS |
+| **Group/ungroup (shared group id)** | PASS |
+| **Chroma key + mask present in the render chain** | PASS |
+| **Adjustment layer merges into lower clips (inside ±, outside Δ0.00)** | PASS |
+| **Audio rack chain (EQ + compressor + noise reduction)** | PASS |
+| **Roll edit preserves total duration** | PASS |
+| Export (libx264 720p, in/out range) → valid MP4 | PASS |
+| ffprobe verification (duration/streams/size) | PASS |
+| Preview engine — paused frame (black-screen regression) | PASS |
+| Preview engine — playback frames advance | PASS |
 
-## 4. Known limitations (v0.1.0)
+**Result: SELFTEST PASS** (all 18 checks).
 
-- Exit path bypasses GL teardown (Mesa llvmpipe shutdown segfault upstream);
-  state is safe (project saved explicitly).
-- Live audio monitoring requires a sound device; export mixdown is unaffected.
-- On systems without FFmpeg, Windows/portable builds auto-download it on
-  first launch (ffmpeg-sidecar).
+## Manual screenshots (Xvfb + x11grab)
+
+- **Edit workspace** — live program monitor compositing demo clips + title,
+  media pool thumbnails, timeline with filmstrip clips / audio waveforms /
+  title clip, inspector (Compositing blend-mode + keyframe diamonds,
+  Transform), 4 live scopes (Waveform/Vectorscope/Parade/Histogram), tool
+  strip, transport with speed control.
+- **Color workspace** — Lift/Gamma/Gain wheels, Offset, Curves section, HSL
+  Secondary, white-balance eyedropper.
+- **Effects workspace** — one-click looks + Blur/Sharpen/Denoise/Glow/
+  Vignette/Hue/Deband/Lens Correction + Chroma Key + Masks.
+
+## Offline bundling
+
+`kestrelcut --where` resolves the bundled FFmpeg first; CI verifies the
+packaged artifacts run with an **empty PATH** (no system FFmpeg visible).

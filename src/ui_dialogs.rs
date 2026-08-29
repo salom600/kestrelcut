@@ -102,7 +102,7 @@ fn file_browser(app: &mut App, ctx: &egui::Context, st: FsState) {
             if let Some(d) = enter_dir {
                 app.dialog = Some(Dialog::Fs(FsState { dir: d, mode: st.mode, name: st.name.clone() }));
             } else if let Some(p) = pick {
-                if matches!(st.mode, FsMode::OpenMedia | FsMode::OpenProject | FsMode::PickLut) {
+                if matches!(st.mode, FsMode::OpenMedia | FsMode::OpenProject | FsMode::PickLut | FsMode::PickSrt) {
                     fs_done(app, p, st.mode);
                 } else {
                     // save modes: fill name
@@ -123,6 +123,7 @@ fn fs_done(app: &mut App, p: std::path::PathBuf, mode: FsMode) {
         FsMode::PickLut => {
             app.set_fx_of_selection(|fx| fx.lut = Some(p));
         }
+        FsMode::PickSrt => app.import_srt(p),
         FsMode::SaveExport => {
             if let Some(name) = p.file_name() {
                 app.export_state.name = name.to_string_lossy().to_string();

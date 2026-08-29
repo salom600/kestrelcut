@@ -18,6 +18,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let t0 = Instant::now();
         self.poll_events(ctx);
+        self.mod_cache = ctx.input(|i| Some(i.modifiers));
         self.handle_shortcuts(ctx);
 
         // real-time playback clock: measure actual wall delta between UI
