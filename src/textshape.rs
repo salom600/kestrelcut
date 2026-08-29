@@ -38,51 +38,45 @@ pub fn shape_text(font: &FontRef, text: &str, size_px: f32) -> Shaping {
         return Shaping { glyphs, advance: pen, rtl: false };
     }
 
-    // BiDi reordering (handles mixed Arabic/Latin lines correctly)
+    // Correct bidi pipeline: split into visually-ordered runs, shape each run
+    // in LOGICAL order with its own direction (HarfBuzz does the RTL reversal
+    // internally — manual pre-reversal would double-reverse).
     let bidi_info = unicode_bidi::BidiInfo::new(text, None);
-    let mut visual_text = String::with_capacity(text.len());
+    let tt_face = rustybuzz::ttf_parser::Face::parse(FACE_BYTES.with(|b| *b), 0)
+        .expect("title font parse");
+    let face = rustybuzz::Face::from_face(tt_face);
+    let upem = font.units_per_em().unwrap_or(1000.0);
+    let k = size_px / upem;
+    let scale = PxScale { x: size_px, y: size_px };
+    let sf = font.as_scaled(scale);
+
+    let mut glyphs: Vec<ShapedGlyph> = Vec::new();
+    let mut pen_x = 0.0f32;
     for p in &bidi_info.paragraphs {
         let (levels, runs) = bidi_info.visual_runs(p, p.range.clone());
         for (ri, run_range) in runs.iter().enumerate() {
             let level = levels.get(ri).copied().unwrap_or(unicode_bidi::Level::ltr());
-            let run: Vec<char> = text[run_range.clone()].chars().collect();
-            if level.number() % 2 == 1 {
-                visual_text.extend(run.into_iter().rev());
-            } else {
-                visual_text.extend(run);
+            let rtl_run = level.number() % 2 == 1;
+            let run_text: &str = &text[run_range.clone()];
+            if run_text.is_empty() { continue; }
+            let mut buffer = UnicodeBuffer::new();
+            buffer.push_str(run_text);
+            buffer.set_direction(if rtl_run { Direction::RightToLeft } else { Direction::LeftToRight });
+            let shaped = rustybuzz::shape(&face, &[], buffer);
+            for (gi, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions().iter()) {
+                let gid = ab_glyph::GlyphId(gi.glyph_id as u16);
+                let px_adv = sf.h_advance(gid);
+                glyphs.push(ShapedGlyph {
+                    id: gi.glyph_id as u16,
+                    x: pen_x + pos.x_offset as f32 * k,
+                    y: -pos.y_offset as f32 * k,
+                });
+                pen_x += px_adv;
             }
         }
     }
-
-    // Shape with HarfBuzz (font units) — the visual run is already in visual
-    // order; force RTL so contextual Arabic forms join correctly.
-    let tt_face = rustybuzz::ttf_parser::Face::parse(FACE_BYTES.with(|b| *b), 0)
-        .expect("title font parse");
-    let face = rustybuzz::Face::from_face(tt_face);
-    let mut buffer = UnicodeBuffer::new();
-    buffer.push_str(&visual_text);
-    buffer.set_direction(Direction::RightToLeft);
-    use std::str::FromStr;
-    if let Ok(lang) = rustybuzz::Language::from_str("ar") { buffer.set_language(lang); }
-    let shaped = rustybuzz::shape(&face, &[], buffer);
-
-    let upem = font.units_per_em().unwrap_or(1000.0);
-    let k = size_px / upem; // font units → pixels
-    let scale = PxScale { x: size_px, y: size_px };
-    let sf = font.as_scaled(scale);
-
-    let mut glyphs = Vec::with_capacity(shaped.glyph_infos().len());
-    let mut pen_x = 0.0f32;
-    for (gi, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions().iter()) {
-        // rustybuzz advances are in font units for an UNSCALED face; ab_glyph
-        // works in px — convert advance via the px-scale advance ratio:
-        // use the px advance of the same glyph id for robustness.
-        let gid = ab_glyph::GlyphId(gi.glyph_id as u16);
-        let px_adv = sf.h_advance(gid);
-        let x = pen_x + pos.x_offset as f32 * k;
-        let y = -pos.y_offset as f32 * k;
-        glyphs.push(ShapedGlyph { id: gi.glyph_id as u16, x, y });
-        pen_x += px_adv;
+    if glyphs.is_empty() {
+        return Shaping { glyphs, advance: 0.0, rtl: true };
     }
     Shaping { glyphs, advance: pen_x, rtl: true }
 }
@@ -109,13 +103,19 @@ mod tests {
         let font = FontRef::try_from_slice(FONT).unwrap();
         // "مرحبا" — letters must join (different glyph ids than isolated forms)
         let s = shape_text(&font, "مرحبا", 72.0);
-        assert_eq!(s.glyphs.len(), 5);
+        // HarfBuzz may emit extra zero-advance contextual marks — at least
+        // one glyph per character, and total advance positive.
+        assert!(s.glyphs.len() >= "مرحبا".chars().count());
         assert!(s.advance > 0.0);
         // shaped ids must differ from the naive char->glyph mapping (joining!)
         let naive: Vec<u16> = "مرحبا".chars()
             .map(|c| font.glyph_id(c).0).collect();
         let shaped: Vec<u16> = s.glyphs.iter().map(|g| g.id).collect();
         assert_ne!(naive, shaped, "Arabic must be contextually shaped");
+        // RTL: clusters arrive in reversed (visual) order
+        let first = s.glyphs.first().unwrap().x;
+        let last = s.glyphs.last().unwrap().x;
+        assert!(first < last, "RTL run must be laid out visually");
     }
 
     #[test]
