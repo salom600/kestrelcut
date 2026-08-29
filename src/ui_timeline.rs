@@ -325,7 +325,10 @@ pub fn canvas_ui(app: &mut App, ui: &mut egui::Ui, canvas: Rect) {
 
     // ---- drag & drop from the media pool (ghost + insertion line) ----------
     if let Some(asset_id) = egui::DragAndDrop::payload::<u64>(ui.ctx()) {
-        if let Some(pt) = pos {
+        // the canvas is NOT the pressed widget during a pool drag — use the
+        // raw pointer position, constrained to the canvas
+        let pt = ui.input(|i| i.pointer.latest_pos()).filter(|p| canvas.contains(*p));
+        if let Some(pt) = pt {
             let (kind, dur) = app.asset_kind_dur(*asset_id);
             let want_video = kind != crate::model::AssetKind::Audio;
             // find the hovered compatible row
@@ -358,11 +361,15 @@ pub fn canvas_ui(app: &mut App, ui: &mut egui::Ui, canvas: Rect) {
                 p.text(Pos2::new(cur_pos.x + 12.5, cur_pos.y + 12.5), Align2::LEFT_TOP,
                     &label, FontId::proportional(11.0), Color32::BLACK);
             }
-            if resp.drag_stopped() {
+            // the press began on the POOL widget — detect the release globally
+            let released = ui.input(|i| i.pointer.any_released());
+            if released {
                 // commit the drop into the hovered compatible track
                 app.drop_media(canvas, &rows, Some(pt), *asset_id, t0, zoom);
                 egui::DragAndDrop::clear_payload(ui.ctx());
             }
+        } else if ui.input(|i| i.pointer.any_released()) {
+            egui::DragAndDrop::clear_payload(ui.ctx());
         }
     }
 

@@ -458,22 +458,51 @@ impl App {
     }
 
     /// Commit a media-pool drop at `pt` onto the compatible track under it.
+    /// Places ON the hovered track (magnetic push on overlap) — never refuses.
     pub fn drop_media(&mut self, canvas: Rect, rows: &[(u64, TrackKind)], pt: Option<Pos2>, asset_id: u64, t0: f64, zoom: f32) {
         let Some(pt) = pt else { return };
-        let (kind, _dur) = self.asset_kind_dur(asset_id);
-        let want_video = kind != crate::model::AssetKind::Audio;
+        let Some(a) = self.assets.iter().find(|a| a.id == asset_id).cloned() else { return };
+        let want_video = a.kind != crate::model::AssetKind::Audio;
         let mut ry = canvas.top() + 22.0;
         for (tid, tkind) in rows {
             let h = match tkind { TrackKind::Video => self.track_h_video, TrackKind::Audio => self.track_h_audio };
             if pt.y >= ry && pt.y < ry + h {
                 let ok = match tkind { TrackKind::Video => want_video, TrackKind::Audio => !want_video };
-                if ok {
-                    let t = t0 + ((pt.x - canvas.left()) / zoom).max(0.0) as f64;
-                    self.commit();
-                    self.add_asset_to_timeline_at(asset_id, t);
-                    self.toast(format!("✓ {}", self.asset_label(asset_id)), 1);
-                    let _ = tid;
+                if !ok { return; }
+                let t = t0 + ((pt.x - canvas.left()) / zoom).max(0.0) as f64;
+                self.commit();
+                match a.kind {
+                    crate::model::AssetKind::Video => {
+                        let vclip = crate::model::clip_from_asset(&a, t, None);
+                        let vid = vclip.id;
+                        if a.has_audio {
+                            let mut aclip = crate::model::clip_from_asset(&a, t, Some(vid));
+                            aclip.kind = crate::model::ClipKind::Audio;
+                            let aid = aclip.id;
+                            let mut vclip = vclip;
+                            vclip.link = Some(aid);
+                            self.project.place_clip(vclip, *tid);
+                            if let Some(at) = self.project.audio_tracks().first().map(|tr| tr.id) {
+                                self.project.place_clip(aclip, at);
+                            }
+                        } else {
+                            self.project.place_clip(vclip, *tid);
+                        }
+                        self.sel = Some(vid);
+                    }
+                    crate::model::AssetKind::Image => {
+                        let c = crate::model::clip_from_asset(&a, t, None);
+                        self.project.place_clip(c, *tid);
+                    }
+                    crate::model::AssetKind::Audio => {
+                        let c = crate::model::clip_from_asset(&a, t, None);
+                        self.project.place_clip(c, *tid);
+                    }
                 }
+                self.commit();
+                self.ensure_wave_for_all();
+                self.invalidate_preview();
+                self.toast(format!("✓ {}", a.label()), 1);
                 return;
             }
             ry += h;
